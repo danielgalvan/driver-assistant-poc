@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/surface_soft"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingBottom="14dp"
+            android:text="@string/settings_title"
+            android:textColor="@color/ink"
+            android:textSize="26sp"
+            android:textStyle="bold" />
+
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            app:cardCornerRadius="18dp">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="16dp">
+                <TextView style="@style/SettingsSectionTitle" android:text="@string/thresholds_title" />
+                <TextView style="@style/SettingsFieldLabel" android:text="@string/per_km" />
+                <com.google.android.material.textfield.TextInputLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="@string/red_below">
+                    <com.google.android.material.textfield.TextInputEditText android:id="@+id/per_km_red" style="@style/ThresholdInput" />
+                </com.google.android.material.textfield.TextInputLayout>
+                <com.google.android.material.textfield.TextInputLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="@string/green_from">
+                    <com.google.android.material.textfield.TextInputEditText android:id="@+id/per_km_green" style="@style/ThresholdInput" />
+                </com.google.android.material.textfield.TextInputLayout>
+                <TextView style="@style/SettingsFieldLabel" android:text="@string/per_hour" />
+                <com.google.android.material.textfield.TextInputLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="@string/red_below">
+                    <com.google.android.material.textfield.TextInputEditText android:id="@+id/per_hour_red" style="@style/ThresholdInput" />
+                </com.google.android.material.textfield.TextInputLayout>
+                <com.google.android.material.textfield.TextInputLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="@string/green_from">
+                    <com.google.android.material.textfield.TextInputEditText android:id="@+id/per_hour_green" style="@style/ThresholdInput" />
+                </com.google.android.material.textfield.TextInputLayout>
+                <TextView style="@style/SettingsFieldLabel" android:text="@string/rating" />
+                <com.google.android.material.textfield.TextInputLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="@string/red_below">
+                    <com.google.android.material.textfield.TextInputEditText android:id="@+id/rating_red" style="@style/ThresholdInput" />
+                </com.google.android.material.textfield.TextInputLayout>
+                <com.google.android.material.textfield.TextInputLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="@string/green_from">
+                    <com.google.android.material.textfield.TextInputEditText android:id="@+id/rating_green" style="@style/ThresholdInput" />
+                </com.google.android.material.textfield.TextInputLayout>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            app:cardCornerRadius="18dp">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="16dp">
+                <TextView style="@style/SettingsSectionTitle" android:text="@string/enabled_indicators" />
+                <com.google.android.material.checkbox.MaterialCheckBox android:id="@+id/enable_per_km" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/enable_per_km" />
+                <com.google.android.material.checkbox.MaterialCheckBox android:id="@+id/enable_per_hour" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/enable_per_hour" />
+                <com.google.android.material.checkbox.MaterialCheckBox android:id="@+id/enable_rating" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/enable_rating" />
+                <TextView style="@style/SettingsSectionTitle" android:text="@string/strategy_title" />
+                <Spinner android:id="@+id/classification_strategy" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="52dp" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            app:cardCornerRadius="18dp">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="16dp">
+                <TextView style="@style/SettingsSectionTitle" android:text="@string/overlay_title" />
+                <com.google.android.material.checkbox.MaterialCheckBox android:id="@+id/overlay_enabled" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/enable_overlay" />
+                <com.google.android.material.textfield.TextInputLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="@string/overlay_duration">
+                    <com.google.android.material.textfield.TextInputEditText android:id="@+id/overlay_duration" android:inputType="number" android:layout_width="match_parent" android:layout_height="wrap_content" />
+                </com.google.android.material.textfield.TextInputLayout>
+                <TextView style="@style/SettingsFieldLabel" android:text="@string/overlay_position" />
+                <Spinner android:id="@+id/overlay_position" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="52dp" />
+                <TextView style="@style/SettingsFieldLabel" android:text="@string/overlay_indicators" />
+                <com.google.android.material.checkbox.MaterialCheckBox android:id="@+id/show_category" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/show_category" />
+                <com.google.android.material.checkbox.MaterialCheckBox android:id="@+id/show_per_km" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/show_per_km" />
+                <com.google.android.material.checkbox.MaterialCheckBox android:id="@+id/show_per_hour" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/show_per_hour" />
+                <com.google.android.material.checkbox.MaterialCheckBox android:id="@+id/show_rating" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/show_rating" />
+                <com.google.android.material.checkbox.MaterialCheckBox android:id="@+id/show_pickup_distance" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/show_pickup_distance" />
+                <com.google.android.material.checkbox.MaterialCheckBox android:id="@+id/show_trip_distance" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/show_trip_distance" />
+                <com.google.android.material.checkbox.MaterialCheckBox android:id="@+id/show_total_distance" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/show_total_distance" />
+                <com.google.android.material.checkbox.MaterialCheckBox android:id="@+id/show_total_time" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/show_total_time" />
+                <com.google.android.material.checkbox.MaterialCheckBox android:id="@+id/show_overall" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/show_overall" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/save_settings"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/save_settings" />
+    </LinearLayout>
+</ScrollView>

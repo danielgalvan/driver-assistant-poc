@@ -1,0 +1,13 @@
+<resources>
+    <string-array name="classification_strategy_labels">
+        <item>@string/strategy_worst</item>
+        <item>@string/strategy_financial</item>
+        <item>@string/strategy_individual</item>
+    </string-array>
+    <string-array name="overlay_position_labels">
+        <item>@string/position_top_right</item>
+        <item>@string/position_top_left</item>
+        <item>@string/position_bottom_right</item>
+        <item>@string/position_bottom_left</item>
+    </string-array>
+</resources>
