@@ -51,11 +51,11 @@ As configurações e diagnósticos usam `SharedPreferences` nesta etapa. O contr
 ## Pré-requisitos
 
 - JDK 21 configurado em `JAVA_HOME`
-- Android SDK com a plataforma API 37 e Android SDK Build Tools
+- Android SDK com a plataforma API 37 Preview e Android SDK Build Tools 37
 - ADB para instalar o APK em aparelho físico
 - Na primeira compilação, acesso aos repositórios Google Maven e Maven Central para baixar o Gradle e as dependências
 
-Combinação validada no ambiente desta revisão: Java 21, Gradle Wrapper 9.6.0, Android Gradle Plugin 9.5.0, `compileSdk 37`, `targetSdk 36` e `minSdk 29`. Não foi necessário atualizar ou rebaixar dependências. O AGP 9.5.0 requer Gradle 9.6.0 e suporta API 37 ([notas do AGP 9.5.0](https://developer.android.com/build/releases/agp-9-5-0-release-notes)); Gradle suporta execução em Java 21 ([compatibilidade do Gradle](https://docs.gradle.org/current/userguide/compatibility.html)).
+Combinação usada nesta revisão: Java 21, Gradle Wrapper 9.6.0, Android Gradle Plugin 9.5.0, `compileSdk 37`, `targetSdk 36` e `minSdk 29`. API 37 é o SDK Preview do Android 17; portanto, a CI o instala pelo canal Canary (`sdkmanager --channel=3`). A compilação falhava antes porque o comando consultava apenas o canal estável, e não por licenças: o log do GitHub confirma que as licenças foram aceitas. O AGP 9.5.0 suporta API 37 ([notas do AGP 9.5.0](https://developer.android.com/build/releases/agp-9-5-0-release-notes)); o SDK Manager documenta `--channel=3` para incluir pacotes Canary ([documentação do sdkmanager](https://developer.android.com/tools/sdkmanager)); Gradle suporta execução em Java 21 ([compatibilidade do Gradle](https://docs.gradle.org/current/userguide/compatibility.html)).
 
 Confira as ferramentas:
 
