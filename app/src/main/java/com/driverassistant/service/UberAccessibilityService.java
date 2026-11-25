@@ -26,6 +26,8 @@ import com.driverassistant.util.DiagnosticLogStore;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 /** Accessibility service restricted by manifest configuration to the Uber Driver package. */
 public final class UberAccessibilityService extends AccessibilityService {
@@ -36,6 +38,8 @@ public final class UberAccessibilityService extends AccessibilityService {
     private static long nextSimulationSession = -1;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final AtomicBoolean snapshotDrainScheduled = new AtomicBoolean();
+    private final AtomicReference<EventRequest> pendingSnapshot = new AtomicReference<>();
     private final Runnable foregroundWatch = new Runnable() {
         @Override public void run() {
             checkOfferWindow();
@@ -58,6 +62,16 @@ public final class UberAccessibilityService extends AccessibilityService {
     private volatile boolean paused;
     private volatile boolean shuttingDown;
     private long simulationSessionId;
+
+    private static final class EventRequest {
+        final int eventType;
+        final long startedAt;
+
+        EventRequest(int eventType, long startedAt) {
+            this.eventType = eventType;
+            this.startedAt = startedAt;
+        }
+    }
 
     public static boolean isConnected() { return connected; }
 
@@ -136,35 +150,69 @@ public final class UberAccessibilityService extends AccessibilityService {
             return;
         }
 
+        // Accessibility callbacks arrive on the service's main thread. Keep this path short:
+        // reading the window tree can involve hundreds of Binder calls on some driver screens.
+        pendingSnapshot.set(new EventRequest(eventType, startedAt));
+        scheduleSnapshotDrain();
+    }
+
+    private void scheduleSnapshotDrain() {
+        Handler handler = analysisHandler;
+        if (handler == null || !snapshotDrainScheduled.compareAndSet(false, true)) return;
+        handler.post(() -> {
+            try {
+                EventRequest request = pendingSnapshot.getAndSet(null);
+                if (request != null) captureSnapshot(request);
+            } finally {
+                snapshotDrainScheduled.set(false);
+                if (pendingSnapshot.get() != null) scheduleSnapshotDrain();
+            }
+        });
+    }
+
+    /** Runs on the dedicated analysis thread; intermediate events are coalesced to the latest. */
+    private void captureSnapshot(EventRequest request) {
+        if (paused || shuttingDown || !connected) return;
+        int eventType = request.eventType;
+        long startedAt = request.startedAt;
+        long workerStartedAt = SystemClock.elapsedRealtime();
+        DiagnosticLogStore.markUberEvent(this, Integer.toString(eventType));
+        DiagnosticLogStore.record(this, "DA_ACCESSIBILITY", "UBER_EVENT", "type=" + eventType);
+        if (!config.monitoringEnabled()) {
+            disableLifecycleOnAnalysis("monitoring_disabled");
+            hideOverlay();
+            return;
+        }
         AccessibilityNodeInfo root = null;
         try {
             root = getRootInActiveWindow();
             if (root == null) {
-                queueMissing("tree_unavailable", startedAt, eventType);
+                processMissing("tree_unavailable", startedAt);
                 return;
             }
             if (root.getPackageName() == null || !UBER_PACKAGE.contentEquals(root.getPackageName())) {
                 root.recycle();
                 root = null;
-                queueMissing("foreign_root", startedAt, eventType);
+                processMissing("foreign_root", startedAt);
                 return;
             }
 
+            long treeReadStartedAt = SystemClock.elapsedRealtime();
             List<AccessibilityNode> snapshot = treeReader.read(root);
+            long treeReadMillis = SystemClock.elapsedRealtime() - treeReadStartedAt;
             root = null; // The reader recycles every visited node, including the root.
+            DiagnosticLogStore.record(this, "DA_ACCESSIBILITY", "SNAPSHOT_TIMING",
+                    "queue_ms=" + Math.max(0, workerStartedAt - startedAt)
+                            + "; tree_ms=" + treeReadMillis + "; nodes=" + snapshot.size());
             if (snapshot.isEmpty()) {
-                queueMissing("empty_tree", startedAt, eventType);
+                processMissing("empty_tree", startedAt);
                 return;
             }
-            List<AccessibilityNode> immutableSnapshot = List.copyOf(snapshot);
-            analysisHandler.post(() -> processSnapshot(immutableSnapshot, eventType, startedAt));
+            processSnapshot(List.copyOf(snapshot), eventType, startedAt);
         } catch (RuntimeException exception) {
-            analysisHandler.post(() -> {
-                DiagnosticLogStore.record(this, "DA_ACCESSIBILITY", "PROCESSING_ERROR",
-                        "exception=" + exception.getClass().getSimpleName());
-                DiagnosticLogStore.markUberEvent(this, Integer.toString(eventType));
-                processMissing("tree_read_error", startedAt);
-            });
+            DiagnosticLogStore.record(this, "DA_ACCESSIBILITY", "PROCESSING_ERROR",
+                    "exception=" + exception.getClass().getSimpleName());
+            processMissing("tree_read_error", startedAt);
         } finally {
             if (root != null) root.recycle();
         }
@@ -204,8 +252,6 @@ public final class UberAccessibilityService extends AccessibilityService {
 
     private void processSnapshot(List<AccessibilityNode> snapshot, int eventType, long startedAt) {
         if (paused || shuttingDown || !connected) return;
-        DiagnosticLogStore.markUberEvent(this, Integer.toString(eventType));
-        DiagnosticLogStore.record(this, "DA_ACCESSIBILITY", "UBER_EVENT", "type=" + eventType);
         if (!config.monitoringEnabled()) {
             disableLifecycleOnAnalysis("monitoring_disabled");
             DiagnosticLogStore.recordProcessingTime(this, SystemClock.elapsedRealtime() - startedAt);
@@ -260,14 +306,6 @@ public final class UberAccessibilityService extends AccessibilityService {
             return;
         }
         DiagnosticLogStore.recordProcessingTime(this, SystemClock.elapsedRealtime() - startedAt);
-    }
-
-    private void queueMissing(String reason, long startedAt, int eventType) {
-        analysisHandler.post(() -> {
-            DiagnosticLogStore.markUberEvent(this, Integer.toString(eventType));
-            DiagnosticLogStore.record(this, "DA_ACCESSIBILITY", "UBER_EVENT", "type=" + eventType);
-            processMissing(reason, startedAt);
-        });
     }
 
     private void processMissing(String reason, long startedAt) {

@@ -53,7 +53,8 @@ public final class OverlayController {
             hide();
             return;
         }
-        handler.post(() -> showOnMainThread(offer, metrics, classification, sessionId, simulated));
+        long requestedAt = android.os.SystemClock.uptimeMillis();
+        handler.post(() -> showOnMainThread(offer, metrics, classification, sessionId, simulated, requestedAt));
     }
 
     public void hide() {
@@ -66,7 +67,8 @@ public final class OverlayController {
     public boolean isVisible() { return visible; }
 
     private void showOnMainThread(TripOffer offer, RideMetrics metrics,
-                                  ClassificationResult classification, long sessionId, boolean simulated) {
+                                  ClassificationResult classification, long sessionId, boolean simulated,
+                                  long requestedAt) {
         try {
             long now = android.os.SystemClock.uptimeMillis();
             long durationMillis = config.overlayDurationSeconds() * 1000L;
@@ -103,7 +105,8 @@ public final class OverlayController {
             }
             DiagnosticLogStore.record(service, "DA_OVERLAY",
                     decision == OverlaySessionPolicy.Decision.NEW_SESSION ? "OVERLAY_SHOWN" : "OVERLAY_UPDATED",
-                    "source=" + (simulated ? "simulation" : "uber") + "; session=" + sessionId);
+                    "source=" + (simulated ? "simulation" : "uber") + "; session=" + sessionId
+                            + "; main_queue_ms=" + Math.max(0, android.os.SystemClock.uptimeMillis() - requestedAt));
         } catch (RuntimeException exception) {
             DiagnosticLogStore.record(service, "DA_OVERLAY", "OVERLAY_ERROR",
                     "exception=" + exception.getClass().getSimpleName());

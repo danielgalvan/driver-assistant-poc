@@ -24,7 +24,8 @@ public final class OfferParser {
     private static final Pattern RATING = Pattern.compile(
             "(?i)\\b(?:nota|avalia[cç][aã]o|rating)\\b\\s*:?\\s*([0-5](?:[.,][0-9]{1,3})?)|★\\s*([0-5](?:[.,][0-9]{1,3})?)");
     private static final Pattern CATEGORY_LABEL = Pattern.compile("(?i)\\b(?:categoria|tipo)\\b\\s*:?\\s*([\\p{L}0-9 -]{2,35})");
-    private static final Pattern CATEGORY = Pattern.compile("(?i)\\b(Uber\\s*(?:X|Black|Comfort|Flash|Moto|Taxi|Bag|Pool)|Comfort|Black|Flash|Moto|Taxi)\\b");
+    private static final Pattern CATEGORY = Pattern.compile(
+            "(?i)\\b(Uber\\s*(?:X|Black|Comfort|Flash|Moto|Taxi|Bag|Pool)|Comfort|Black|Flash|Moto|Taxi|Priority)\\b");
     private static final String[] EXCLUDED_SCREENS = {
             "histórico", "historico", "carteira", "saldo da", "ganhos acumulados",
             "corrida em andamento", "viagem em andamento", "corrida iniciada",
@@ -32,18 +33,21 @@ public final class OfferParser {
     };
     private static final String[] EXCLUDED_MONEY_CONTEXT = {
             "saldo", "carteira", "ganhos acumulados", "promoção", "promocao",
-            "bônus", "bonus", "preço dinâmico", "preco dinamico", "multiplicador"
+            "bônus", "bonus", "preço dinâmico", "preco dinamico", "multiplicador",
+            "incluído", "incluída", "incluido", "incluida", "para retirada",
+            "est. de", "estimativa", "por km", "/km", "por hora", "/h", "adicional"
     };
     private static final String[] OFFER_AMOUNT_CUES = {
-            "oferta", "valor", "aceitar", "selecionar", "corrida", "uberx", "comfort", "black"
+            "oferta", "valor", "aceitar", "selecionar", "corrida", "uberx", "comfort", "black", "priority"
     };
     private static final String[] PICKUP_CUES = {
             "embarque", "pickup", "buscar passageiro", "até o passageiro", "ate o passageiro",
-            "até embarque", "ate embarque", "para buscar"
+            "até embarque", "ate embarque", "para buscar", "retirada", "retirar"
     };
     private static final String[] TRIP_CUES = {
             "distância da viagem", "distancia da viagem", "tempo de viagem", "duração da viagem",
-            "duracao da viagem", "trajeto", "destino", "viagem", "trip distance", "trip duration", "com passageiro"
+            "duracao da viagem", "trajeto", "destino", "viagem", "trip distance", "trip duration",
+            "com passageiro", "viagem longa"
     };
     private static final String[] RATING_CUES = {"nota", "avaliação", "avaliacao", "rating", "passageiro"};
 
@@ -78,23 +82,28 @@ public final class OfferParser {
             if (allText.contains(excluded)) return rejected("screen_context:" + excluded.replace(' ', '_'));
         }
 
-        Double amount = findOfferAmount(lines);
+        boolean explicitOffer = containsAny(allText, "oferta", "aceitar", "selecionar", "nova corrida", "chamada recebida");
+        Double amount = findOfferAmount(joinedText, lines, nodes, starts, explicitOffer);
         Double rating = findRating(contextLines);
         String category = findCategory(contextLines);
         Double pickupDistance = null;
         Double pickupMinutes = null;
         Double tripDistance = null;
         Double tripMinutes = null;
+        List<Double> unassignedDistances = new ArrayList<>();
+        List<Double> unassignedDurations = new ArrayList<>();
 
         Matcher distanceMatcher = DISTANCE.matcher(joinedText);
         while (distanceMatcher.find()) {
             String unit = distanceMatcher.group(2).toLowerCase(Locale.ROOT);
+            if (isEstimatedPerUnit(joinedText, distanceMatcher.start(), distanceMatcher.end())) continue;
             double parsed = number(distanceMatcher.group(1), LocalizedNumberParser.Context.DISTANCE);
             if (!Double.isFinite(parsed) || parsed < 0) continue;
             if (unit.equals("m") || unit.startsWith("metro")) parsed /= 1000.0;
             int contextKind = nearestTravelContext(distanceMatcher.start(), nodes, starts);
             if (contextKind == 1 && pickupDistance == null) pickupDistance = parsed;
             else if (contextKind == 2 && tripDistance == null) tripDistance = parsed;
+            else if (contextKind == 0) unassignedDistances.add(parsed);
         }
 
         double pickupDuration = 0;
@@ -103,12 +112,14 @@ public final class OfferParser {
         boolean foundTripDuration = false;
         Matcher durationMatcher = DURATION.matcher(joinedText);
         while (durationMatcher.find()) {
+            if (isThresholdDuration(joinedText, durationMatcher.start())) continue;
             double parsed = number(durationMatcher.group(1), LocalizedNumberParser.Context.DURATION);
             if (!Double.isFinite(parsed) || parsed < 0) continue;
             if (durationMatcher.group(2).toLowerCase(Locale.ROOT).startsWith("h")) parsed *= 60.0;
             int contextKind = nearestTravelContext(durationMatcher.start(), nodes, starts);
             if (contextKind == 1) { pickupDuration += parsed; foundPickupDuration = true; }
             else if (contextKind == 2) { tripDuration += parsed; foundTripDuration = true; }
+            else if (contextKind == 0) unassignedDurations.add(parsed);
         }
         Matcher shortMinutes = COMPOUND_SHORT_MINUTES.matcher(joinedText);
         while (shortMinutes.find()) {
@@ -118,11 +129,21 @@ public final class OfferParser {
             if (contextKind == 1) { pickupDuration += parsed; foundPickupDuration = true; }
             else if (contextKind == 2) { tripDuration += parsed; foundTripDuration = true; }
         }
+
+        // Some offer cards expose two unlabeled time/distance pairs in visual order.
+        // Use that order only when the same snapshot contains an explicit offer action.
+        if (explicitOffer && unassignedDistances.size() == 2) {
+            if (pickupDistance == null) pickupDistance = unassignedDistances.get(0);
+            if (tripDistance == null) tripDistance = unassignedDistances.get(1);
+        }
+        if (explicitOffer && unassignedDurations.size() == 2) {
+            if (!foundPickupDuration) { pickupDuration = unassignedDurations.get(0); foundPickupDuration = true; }
+            if (!foundTripDuration) { tripDuration = unassignedDurations.get(1); foundTripDuration = true; }
+        }
         if (foundPickupDuration) pickupMinutes = pickupDuration;
         if (foundTripDuration) tripMinutes = tripDuration;
 
         String lowerAll = allText;
-        boolean explicitOffer = containsAny(lowerAll, "oferta", "aceitar", "selecionar", "nova corrida", "chamada recebida");
         boolean travelContext = containsAny(lowerAll, PICKUP_CUES) || containsAny(lowerAll, TRIP_CUES);
         boolean categoryContext = category != null;
         if (lowerAll.contains("mapa") && !explicitOffer) return rejected("screen_context:map");
@@ -145,35 +166,71 @@ public final class OfferParser {
         return new OfferParseResult(offer, null, found, unavailable);
     }
 
-    private static Double findOfferAmount(List<String> lines) {
+    private static Double findOfferAmount(String joinedText, List<String> lines,
+                                          List<AccessibilityNode> nodes, List<Integer> starts,
+                                          boolean explicitOffer) {
         Double selected = null;
         int bestScore = Integer.MIN_VALUE;
-        for (int index = 0; index < lines.size(); index++) {
-            String context = window(lines, index, 2).toLowerCase(Locale.ROOT);
-            Matcher matcher = MONEY.matcher(context);
-            while (matcher.find()) {
-                int localStart = Math.max(0, matcher.start() - 48);
-                String localContext = context.substring(localStart,
-                        Math.min(context.length(), matcher.end() + 48));
-                int localValueIndex = matcher.start() - localStart;
-                int excludedDistance = nearestCueDistance(localContext, localValueIndex, EXCLUDED_MONEY_CONTEXT);
-                int offerDistance = nearestCueDistance(localContext, localValueIndex, OFFER_AMOUNT_CUES);
-                if (excludedDistance <= offerDistance) continue;
-                Double value = LocalizedNumberParser.parse(matcher.group(1) != null ? matcher.group(1) : matcher.group(2),
-                        LocalizedNumberParser.Context.MONEY);
-                if (value == null || value < 0) continue;
-                int score = 0;
-                String lowerLocalContext = localContext.toLowerCase(Locale.ROOT);
-                if (lowerLocalContext.contains("oferta") || lowerLocalContext.contains("valor da corrida")
-                        || lowerLocalContext.contains("valor da viagem")) score += 8;
-                if (lowerLocalContext.contains("aceitar") || lowerLocalContext.contains("selecionar")) score += 4;
-                if (lowerLocalContext.contains("r$") || lowerLocalContext.contains("brl")) score += 2;
-                if (lowerLocalContext.contains("uberx") || lowerLocalContext.contains("comfort")
-                        || lowerLocalContext.contains("black")) score += 1;
-                if (score > bestScore) { bestScore = score; selected = value; }
+        Matcher matcher = MONEY.matcher(joinedText);
+        while (matcher.find()) {
+            int nodeIndex = nodeIndexAt(starts, matcher.start());
+            if (nodeIndex < 0 || nodeIndex >= nodes.size()) continue;
+            int fromNode = Math.max(0, nodeIndex - 3);
+            int toNode = Math.min(nodes.size() - 1, nodeIndex + 3);
+            int fromChar = starts.get(fromNode);
+            int toChar = starts.get(toNode) + lines.get(toNode).length();
+            String localContext = joinedText.substring(fromChar, Math.min(joinedText.length(), toChar));
+            int localValueIndex = matcher.start() - fromChar;
+            String lowerLocalContext = localContext.toLowerCase(Locale.ROOT);
+            int offerDistance = nearestCueDistance(lowerLocalContext, localValueIndex, OFFER_AMOUNT_CUES);
+            AccessibilityNode valueNode = nodes.get(nodeIndex);
+            String ownText = lines.get(nodeIndex).toLowerCase(Locale.ROOT);
+            int ownValueIndex = matcher.start() - starts.get(nodeIndex);
+            int excludedDistance = nearestCueDistance(ownText, ownValueIndex, EXCLUDED_MONEY_CONTEXT);
+            String ownId = valueNode == null || valueNode.resourceId() == null ? ""
+                    : valueNode.resourceId().toLowerCase(Locale.ROOT);
+            if (excludedDistance != Integer.MAX_VALUE
+                    || containsAny(ownId, "bonus", "surge", "promotion", "incentive", "pickup_fee", "dynamic")) continue;
+
+            StringBuilder resourceContext = new StringBuilder();
+            for (int index = fromNode; index <= toNode; index++) {
+                AccessibilityNode node = nodes.get(index);
+                if (node != null && node.resourceId() != null) resourceContext.append(' ')
+                        .append(node.resourceId().toLowerCase(Locale.ROOT));
             }
+            String ids = resourceContext.toString();
+            if (containsAny(ownId, "bonus", "surge", "promotion", "incentive", "pickup_fee", "dynamic")) continue;
+
+            // Bare currency values are accepted only on a snapshot with an explicit offer action.
+            if (offerDistance == Integer.MAX_VALUE && !explicitOffer
+                    && !containsAny(ids, "fare", "price", "offer", "amount", "payout")) continue;
+
+            Double value = LocalizedNumberParser.parse(matcher.group(1) != null ? matcher.group(1) : matcher.group(2),
+                    LocalizedNumberParser.Context.MONEY);
+            if (value == null || value < 0) continue;
+            int score = 0;
+            if (lowerLocalContext.contains("oferta") || lowerLocalContext.contains("valor da corrida")
+                    || lowerLocalContext.contains("valor da viagem") || lowerLocalContext.contains("preço total")) score += 8;
+            if (lowerLocalContext.contains("aceitar") || lowerLocalContext.contains("selecionar")) score += 4;
+            if (lowerLocalContext.contains("r$") || lowerLocalContext.contains("brl")) score += 2;
+            if (containsAny(ids, "fare", "price", "offer", "amount", "payout")) score += 6;
+            if (containsAny(lowerLocalContext, "uberx", "comfort", "black", "priority")) score += 1;
+            if (score > bestScore) { bestScore = score; selected = value; }
         }
         return selected;
+    }
+
+    private static boolean isEstimatedPerUnit(String text, int start, int end) {
+        String before = text.substring(Math.max(0, start - 24), start).toLowerCase(Locale.ROOT);
+        String after = text.substring(end, Math.min(text.length(), end + 8)).toLowerCase(Locale.ROOT);
+        return before.contains("est.") || before.contains("estimativa")
+                || after.startsWith("/km") || before.contains("por km");
+    }
+
+    private static boolean isThresholdDuration(String text, int start) {
+        String before = text.substring(Math.max(0, start - 20), start).toLowerCase(Locale.ROOT).trim();
+        return before.endsWith("mais de") || before.endsWith("acima de") || before.endsWith(">")
+                || before.endsWith("over");
     }
 
     private static Double findRating(List<String> lines) {

@@ -56,6 +56,33 @@ public final class OfferParserTest {
         assertEquals(4.90, parsed.offer().passengerRating(), 0.0001); // Resource ID supplies rating context.
     }
 
+    @Test public void parsesSimulatedPriorityOfferWithoutTreatingAddOnsAsFare() {
+        List<AccessibilityNode> simulatedTree = List.of(
+                new AccessibilityNode("Priority", null, "offer/category", "TextView", -1, 0, 0),
+                new AccessibilityNode("Exclusivo", null, "offer/subtitle", "TextView", 0, 1, 1),
+                new AccessibilityNode("R$ 29,09", null, "offer/fare", "TextView", 0, 1, 2),
+                new AccessibilityNode("Est. de R$ 2,51/km", null, "offer/estimated_rate", "TextView", 0, 1, 3),
+                new AccessibilityNode("4,93 (1051)", null, "offer/passenger_rating", "TextView", 0, 1, 4),
+                new AccessibilityNode("+R$ 8,50 incluído", null, "offer/surge_bonus", "TextView", 0, 1, 5),
+                new AccessibilityNode("+R$ 3,22 incluída para retirada", null, "offer/pickup_bonus", "TextView", 0, 1, 6),
+                new AccessibilityNode("7 min (0,8 km)", null, "offer/pickup_details", "TextView", 0, 1, 7),
+                new AccessibilityNode("Local de embarque", null, "offer/pickup_address", "TextView", 0, 1, 8),
+                new AccessibilityNode("33 minutos (10,8 km)", null, "offer/trip_details", "TextView", 0, 1, 9),
+                new AccessibilityNode("Destino", null, "offer/trip_destination", "TextView", 0, 1, 10),
+                new AccessibilityNode("Viagem longa (mais de 30 min)", null, "offer/long_trip_badge", "TextView", 0, 1, 11),
+                new AccessibilityNode("Aceitar", null, "offer/accept", "Button", 0, 1, 12));
+
+        OfferParseResult parsed = parser.parseNodes(simulatedTree);
+        assertTrue(parsed.accepted());
+        assertEquals(29.09, parsed.offer().offeredAmount(), 0.0001);
+        assertEquals("Priority", parsed.offer().category());
+        assertEquals(4.93, parsed.offer().passengerRating(), 0.0001);
+        assertEquals(0.8, parsed.offer().pickupDistanceKm(), 0.0001);
+        assertEquals(7.0, parsed.offer().pickupEtaMinutes(), 0.0001);
+        assertEquals(10.8, parsed.offer().tripDistanceKm(), 0.0001);
+        assertEquals(33.0, parsed.offer().tripDurationMinutes(), 0.0001);
+    }
+
     @Test public void choosesOfferFareInsteadOfAnEarlierUnrelatedMoneyValue() {
         TripOffer offer = parser.parse(List.of("UberX", "Estimativa anterior R$ 8,00", "", "info", "painel", "corrida",
                 "Oferta selecionável",
