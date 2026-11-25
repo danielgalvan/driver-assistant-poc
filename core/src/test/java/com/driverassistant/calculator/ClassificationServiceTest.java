@@ -41,8 +41,18 @@ public final class ClassificationServiceTest {
         ThresholdConfig config = config(ClassificationStrategy.FINANCIAL_GREEN,
                 true, true, true);
         ClassificationResult result = service.classify(new RideMetrics(6.0, 30.0, 2.0, 40.0), null, config);
-        assertEquals(Signal.YELLOW, result.overallSignal());
+        assertEquals(Signal.UNKNOWN, result.overallSignal());
         assertTrue(result.incomplete());
+    }
+
+    @Test public void classifiesHourAndRatingAtExactBoundaries() {
+        ThresholdConfig config = ThresholdConfig.defaults();
+        ClassificationResult atRed = classify(1.8, 30.0, 4.3, config);
+        assertEquals(Signal.YELLOW, atRed.indicators().get(Indicator.EARNINGS_PER_HOUR).signal());
+        assertEquals(Signal.YELLOW, atRed.indicators().get(Indicator.PASSENGER_RATING).signal());
+        ClassificationResult atGreen = classify(1.8, 40.0, 4.9, config);
+        assertEquals(Signal.GREEN, atGreen.indicators().get(Indicator.EARNINGS_PER_HOUR).signal());
+        assertEquals(Signal.GREEN, atGreen.indicators().get(Indicator.PASSENGER_RATING).signal());
     }
 
     @Test public void disabledIndicatorsDoNotAffectOverallClassification() {
@@ -53,6 +63,15 @@ public final class ClassificationServiceTest {
         assertFalse(result.indicators().get(Indicator.EARNINGS_PER_HOUR).enabled());
         assertEquals(Signal.UNKNOWN, result.indicators().get(Indicator.EARNINGS_PER_HOUR).signal());
         assertFalse(result.incomplete());
+    }
+
+    @Test public void doesNotConcludeOverallClassificationFromPassengerRatingAlone() {
+        ThresholdConfig config = config(ClassificationStrategy.WORST_ENABLED,
+                false, false, true);
+        ClassificationResult result = service.classify(new RideMetrics(null, null, null, null), 5.0, config);
+        assertEquals(Signal.UNKNOWN, result.overallSignal());
+        assertTrue(result.incomplete());
+        assertEquals(Signal.GREEN, result.indicators().get(Indicator.PASSENGER_RATING).signal());
     }
 
     @Test public void missingEnabledValuesAreUnknownAndMarkClassificationIncomplete() {

@@ -1,64 +1,81 @@
 package com.driverassistant.parser;
 
+/** Parses localized numeric values only when their separators are unambiguous in context. */
 public final class LocalizedNumberParser {
+    public enum Context { MONEY, DISTANCE, DURATION, RATING, GENERIC }
+
     private LocalizedNumberParser() { }
 
-    /** Aceita formato brasileiro (1.234,56) e formatos com ponto decimal (1234.56). */
+    /** Generic parsing rejects a single separator followed by three digits as ambiguous. */
     public static Double parse(String raw) {
-        if (raw == null) return null;
+        return parse(raw, Context.GENERIC);
+    }
+
+    public static Double parse(String raw, Context context) {
+        if (raw == null || context == null) return null;
         String value = raw.trim()
-                .replace("R$", "")
-                .replace("BRL", "")
-                .replace("US$", "")
-                .replace("$", "")
-                .replace(" ", "");
+                .replace("R$", "").replace("BRL", "").replace("US$", "").replace("$", "")
+                .replace("\u00a0", "").replace(" ", "");
         if (value.isEmpty()) return null;
 
         int comma = value.lastIndexOf(',');
         int dot = value.lastIndexOf('.');
         if (comma >= 0 && dot >= 0) {
-            char decimalSeparator = comma > dot ? ',' : '.';
-            char groupingSeparator = decimalSeparator == ',' ? '.' : ',';
-            if (value.indexOf(decimalSeparator) != value.lastIndexOf(decimalSeparator)) return null;
-            String integerPart = value.substring(0, value.lastIndexOf(decimalSeparator));
-            String fractionPart = value.substring(value.lastIndexOf(decimalSeparator) + 1);
-            String unsignedInteger = integerPart.startsWith("-") || integerPart.startsWith("+")
-                    ? integerPart.substring(1) : integerPart;
-            if (!validGroupedInteger(unsignedInteger, groupingSeparator) || !digits(fractionPart)) return null;
-            value = value.substring(0, value.lastIndexOf(decimalSeparator))
-                    .replace(String.valueOf(groupingSeparator), "") + "." + fractionPart;
-            value = replaceLast(value, decimalSeparator, '.');
-        } else if (comma >= 0) {
-            value = normalizeSingleSeparator(value, ',');
-        } else if (dot >= 0) {
-            value = normalizeSingleSeparator(value, '.');
+            char decimal = comma > dot ? ',' : '.';
+            char grouping = decimal == ',' ? '.' : ',';
+            if (value.indexOf(decimal) != value.lastIndexOf(decimal)) return null;
+            String integer = value.substring(0, value.lastIndexOf(decimal));
+            String fraction = value.substring(value.lastIndexOf(decimal) + 1);
+            if (!validGroupedInteger(unsigned(integer), grouping) || !digits(fraction)) return null;
+            value = integer.replace(String.valueOf(grouping), "") + "." + fraction;
+        } else if (comma >= 0 || dot >= 0) {
+            char separator = comma >= 0 ? ',' : '.';
+            int first = value.indexOf(separator);
+            int last = value.lastIndexOf(separator);
+            if (first != last) {
+                if (!validGroupedInteger(unsigned(value), separator)) return null;
+                value = value.replace(String.valueOf(separator), "");
+            } else {
+                String integer = value.substring(0, last);
+                String fraction = value.substring(last + 1);
+                if (!digits(unsigned(integer)) || !digits(fraction)) return null;
+                if (fraction.length() == 3) {
+                    if (context == Context.GENERIC) return null;
+                    if (context == Context.MONEY && separator == ',') return null;
+                    if (context == Context.MONEY && separator == '.'
+                            && validGroupedInteger(unsigned(integer) + separator + fraction, separator)) {
+                        value = integer + fraction;
+                    } else {
+                        value = integer + "." + fraction;
+                    }
+                } else {
+                    value = integer + "." + fraction;
+                }
+            }
         }
 
+        if (!validSignedDecimal(value)) return null;
         try {
             double parsed = Double.parseDouble(value);
-            return Double.isFinite(parsed) ? parsed : null;
+            if (!Double.isFinite(parsed)) return null;
+            if (context == Context.RATING && (parsed < 0 || parsed > 5)) return null;
+            if (context != Context.GENERIC && parsed < 0) return null;
+            return parsed;
         } catch (NumberFormatException ignored) {
             return null;
         }
     }
 
-    private static String normalizeSingleSeparator(String value, char separator) {
-        int first = value.indexOf(separator);
-        int last = value.lastIndexOf(separator);
-        if (first != last) {
-            String unsigned = value.startsWith("-") || value.startsWith("+") ? value.substring(1) : value;
-            if (!validGroupedInteger(unsigned, separator)) return "invalid";
-            return value.replace(String.valueOf(separator), "");
-        }
-        int digitsAfter = value.length() - last - 1;
-        String integerPart = value.substring(0, last);
-        String unsignedInteger = integerPart.startsWith("-") || integerPart.startsWith("+")
-                ? integerPart.substring(1) : integerPart;
-        String fractionPart = value.substring(last + 1);
-        if (!digits(unsignedInteger) || !digits(fractionPart)) return "invalid";
-        if (digitsAfter == 3 && last > 0) return value.replace(String.valueOf(separator), "");
-        if (separator == ',') return replaceLast(value, ',', '.');
-        return value;
+    private static String unsigned(String value) {
+        return value.startsWith("-") || value.startsWith("+") ? value.substring(1) : value;
+    }
+
+    private static boolean validSignedDecimal(String value) {
+        String unsigned = unsigned(value);
+        int dot = unsigned.indexOf('.');
+        if (dot >= 0 && (dot != unsigned.lastIndexOf('.') || !digits(unsigned.substring(0, dot))
+                || !digits(unsigned.substring(dot + 1)))) return false;
+        return dot >= 0 || digits(unsigned);
     }
 
     private static boolean validGroupedInteger(String value, char separator) {
@@ -77,11 +94,5 @@ public final class LocalizedNumberParser {
             if (!Character.isDigit(value.charAt(index))) return false;
         }
         return true;
-    }
-
-    private static String replaceLast(String value, char oldChar, char newChar) {
-        int index = value.lastIndexOf(oldChar);
-        if (index < 0) return value;
-        return value.substring(0, index) + newChar + value.substring(index + 1);
     }
 }

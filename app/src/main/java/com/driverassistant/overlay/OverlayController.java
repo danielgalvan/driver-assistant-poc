@@ -8,6 +8,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.view.Gravity;
 import android.view.LayoutInflater;
+import android.view.ContextThemeWrapper;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.TextView;
@@ -24,6 +25,7 @@ import com.driverassistant.domain.IndicatorResult;
 import com.driverassistant.domain.RideMetrics;
 import com.driverassistant.domain.Signal;
 import com.driverassistant.domain.TripOffer;
+import com.driverassistant.lifecycle.OverlaySessionPolicy;
 import com.driverassistant.util.DiagnosticLogStore;
 
 import java.util.Locale;
@@ -34,8 +36,10 @@ public final class OverlayController {
     private final WindowManager windowManager;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ConfigRepository config;
+    private final OverlaySessionPolicy sessionPolicy = new OverlaySessionPolicy();
     private View card;
     private Runnable dismissTask;
+    private volatile boolean visible;
 
     public OverlayController(AccessibilityService service) {
         this.service = service;
@@ -43,44 +47,81 @@ public final class OverlayController {
         this.config = new ConfigRepository(service);
     }
 
-    public void show(TripOffer offer, RideMetrics metrics, ClassificationResult classification) {
-        if (!config.overlayEnabled()) {
+    public void show(TripOffer offer, RideMetrics metrics, ClassificationResult classification,
+                     long sessionId, boolean simulated) {
+        if (!config.overlayEnabled() && !simulated) {
             hide();
             return;
         }
-        handler.post(() -> showOnMainThread(offer, metrics, classification, false));
+        handler.post(() -> showOnMainThread(offer, metrics, classification, sessionId, simulated));
     }
 
     public void hide() {
-        handler.post(this::removeOnMainThread);
+        handler.post(() -> {
+            sessionPolicy.clear();
+            removeOnMainThread();
+        });
     }
 
+    public boolean isVisible() { return visible; }
+
     private void showOnMainThread(TripOffer offer, RideMetrics metrics,
-                                  ClassificationResult classification, boolean simulated) {
+                                  ClassificationResult classification, long sessionId, boolean simulated) {
         try {
+            long now = android.os.SystemClock.uptimeMillis();
+            long durationMillis = config.overlayDurationSeconds() * 1000L;
+            String fingerprint = displayFingerprint(offer, metrics, classification);
+            OverlaySessionPolicy.Decision decision = sessionPolicy.show(sessionId, fingerprint, now, durationMillis);
+            if (decision == OverlaySessionPolicy.Decision.EXPIRED) {
+                removeOnMainThread();
+                DiagnosticLogStore.record(service, "DA_OVERLAY", "OVERLAY_EXPIRED", "session=" + sessionId);
+                return;
+            }
+            if (decision == OverlaySessionPolicy.Decision.DUPLICATE) return;
             if (card == null) {
-                card = LayoutInflater.from(service).inflate(R.layout.overlay_offer_card, null, false);
+                ContextThemeWrapper themedContext = new ContextThemeWrapper(service, R.style.Theme_DriverAssistant);
+                card = LayoutInflater.from(themedContext).inflate(R.layout.overlay_offer_card, null, false);
+                card.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
             }
             ThresholdConfig thresholds = config.loadThresholds();
             bind(card, offer, metrics, classification, thresholds, simulated);
             WindowManager.LayoutParams params = layoutParams();
             if (card.getParent() == null) windowManager.addView(card, params);
             else windowManager.updateViewLayout(card, params);
+            visible = true;
 
-            if (dismissTask != null) handler.removeCallbacks(dismissTask);
-            dismissTask = this::removeOnMainThread;
-            handler.postDelayed(dismissTask, config.overlayDurationSeconds() * 1000L);
-            DiagnosticLogStore.record(service, "DA_OVERLAY", "OVERLAY_SHOWN", "source=uber");
+            if (decision == OverlaySessionPolicy.Decision.NEW_SESSION) {
+                if (dismissTask != null) handler.removeCallbacks(dismissTask);
+                long currentSession = sessionId;
+                dismissTask = () -> {
+                    if (sessionPolicy.expire(currentSession, android.os.SystemClock.uptimeMillis())) {
+                        removeOnMainThread();
+                        DiagnosticLogStore.record(service, "DA_OVERLAY", "OVERLAY_EXPIRED", "session=" + currentSession);
+                    }
+                };
+                handler.postDelayed(dismissTask, sessionPolicy.remainingMillis(now));
+            }
+            DiagnosticLogStore.record(service, "DA_OVERLAY",
+                    decision == OverlaySessionPolicy.Decision.NEW_SESSION ? "OVERLAY_SHOWN" : "OVERLAY_UPDATED",
+                    "source=" + (simulated ? "simulation" : "uber") + "; session=" + sessionId);
         } catch (RuntimeException exception) {
             DiagnosticLogStore.record(service, "DA_OVERLAY", "OVERLAY_ERROR",
                     "exception=" + exception.getClass().getSimpleName());
+            sessionPolicy.clear();
             removeOnMainThread();
         }
     }
 
     private void bind(View root, TripOffer offer, RideMetrics metrics,
                       ClassificationResult classification, ThresholdConfig thresholds, boolean simulated) {
-        setText(root, R.id.overlay_title, summary(metrics));
+        TextView sourceBadge = root.findViewById(R.id.overlay_app_badge);
+        sourceBadge.setText(simulated ? "SIM" : "U");
+        sourceBadge.setTextSize(simulated ? 8 : 11);
+        sourceBadge.setBackgroundTintList(ColorStateList.valueOf(service.getColor(
+                simulated ? R.color.brand_primary : R.color.ink)));
+        sourceBadge.setPadding(simulated ? dp(3) : 0, 0, simulated ? dp(3) : 0, 0);
+        sourceBadge.setContentDescription(simulated ? "Simulação, não é uma oferta real" : "Uber Driver");
+        setText(root, R.id.overlay_title, (simulated ? "SIMULAÇÃO · " : "") + summary(metrics));
         setIndicatorMetric(root, R.id.overlay_per_km_item, R.id.overlay_per_km,
                 R.id.overlay_per_km_bar, service.getString(R.string.offer_per_km),
                 indicator(classification, Indicator.EARNINGS_PER_KM),
@@ -95,9 +136,9 @@ public final class OverlayController {
                 config.showRating() && thresholds.ratingEnabled());
 
         Signal overallSignal = Signal.UNKNOWN;
-        String overallLabel = "ANALISAR";
+        String overallLabel = "INCOMPLETO";
         if (classification != null && classification.individualOnly()) {
-            overallLabel = "INDIVIDUAL";
+            overallLabel = "INCOMPLETO";
         } else if (classification != null && classification.incomplete()) {
             overallLabel = "INCOMPLETO";
         } else if (classification != null) {
@@ -105,7 +146,7 @@ public final class OverlayController {
             overallLabel = recommendation(overallSignal);
         }
         TextView overall = root.findViewById(R.id.overlay_overall);
-        if (!config.showOverall()) {
+        if (!config.showOverall() || (classification != null && classification.individualOnly())) {
             overall.setVisibility(View.GONE);
         } else {
             overall.setVisibility(View.VISIBLE);
@@ -120,15 +161,17 @@ public final class OverlayController {
         offerCard.setStrokeColor(borderColor);
         offerCard.setStrokeWidth(dp(2));
 
-        boolean showCategory = config.showCategory() && offer != null && offer.category() != null;
-        boolean showPickup = config.showPickupDistance() && offer != null && offer.pickupDistanceKm() != null;
-        boolean showTrip = config.showTripDistance() && offer != null && offer.tripDistanceKm() != null;
+        boolean showCategory = config.showCategory();
+        boolean showPickup = config.showPickupDistance();
+        boolean showTrip = config.showTripDistance();
+        setOptional(root, R.id.overlay_amount, service.getString(R.string.offer_amount),
+                money(offer == null ? null : offer.offeredAmount()), config.showAmount());
         setOptional(root, R.id.overlay_category, service.getString(R.string.offer_category),
                 offer == null ? null : offer.category(), showCategory);
         setOptional(root, R.id.overlay_pickup_distance, service.getString(R.string.offer_pickup_distance),
-                distance(offer == null ? null : offer.pickupDistanceKm()), showPickup);
+                travelMetric(offer == null ? null : offer.pickupDistanceKm(), offer == null ? null : offer.pickupEtaMinutes()), showPickup);
         setOptional(root, R.id.overlay_trip_distance, service.getString(R.string.offer_trip_distance),
-                distance(offer == null ? null : offer.tripDistanceKm()), showTrip);
+                travelMetric(offer == null ? null : offer.tripDistanceKm(), offer == null ? null : offer.tripDurationMinutes()), showTrip);
         root.findViewById(R.id.overlay_details).setVisibility(
                 showCategory || showPickup || showTrip ? View.VISIBLE : View.GONE);
     }
@@ -146,6 +189,7 @@ public final class OverlayController {
         Signal signal = result == null || !result.enabled() ? Signal.UNKNOWN : result.signal();
         TextView valueView = root.findViewById(valueId);
         valueView.setText(value);
+        valueView.setAutoSizeTextTypeUniformWithConfiguration(13, 22, 1, android.util.TypedValue.COMPLEX_UNIT_SP);
         View bar = root.findViewById(barId);
         bar.setBackgroundTintList(ColorStateList.valueOf(color(signal)));
         item.setContentDescription(label + ": " + value + ", " + signalName(signal));
@@ -179,7 +223,7 @@ public final class OverlayController {
                         | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                 PixelFormat.TRANSLUCENT);
         int availableWidth = service.getResources().getDisplayMetrics().widthPixels - 2 * margin;
-        params.width = Math.min(dp(360), Math.max(dp(240), availableWidth));
+        params.width = Math.max(dp(1), Math.min(dp(360), availableWidth));
         params.gravity = gravity;
         params.x = margin;
         params.y = y;
@@ -204,6 +248,16 @@ public final class OverlayController {
 
     private static boolean valid(Double value) { return value != null && Double.isFinite(value); }
 
+    private String travelMetric(Double distanceKm, Double minutes) {
+        StringBuilder value = new StringBuilder();
+        if (valid(distanceKm)) value.append(distance(distanceKm));
+        if (valid(minutes)) {
+            if (value.length() > 0) value.append(" · ");
+            value.append(duration(minutes));
+        }
+        return value.length() == 0 ? null : value.toString();
+    }
+
     private String signalName(Signal signal) {
         if (signal == null || signal == Signal.UNKNOWN) return "ANALISAR";
         return switch (signal) {
@@ -216,10 +270,10 @@ public final class OverlayController {
 
     private String recommendation(Signal signal) {
         return switch (signal == null ? Signal.UNKNOWN : signal) {
-            case RED -> "REJEITAR";
-            case YELLOW -> "ATENÇÃO";
-            case GREEN -> "ACEITAR";
-            case UNKNOWN -> "ANALISAR";
+            case RED -> "POUCO RENTÁVEL";
+            case YELLOW -> "AVALIAR";
+            case GREEN -> "INTERESSANTE";
+            case UNKNOWN -> "INCOMPLETO";
         };
     }
 
@@ -231,10 +285,10 @@ public final class OverlayController {
                 ? distance(metrics.totalDistanceKm()) : null;
         if (time != null) summary.append(time);
         if (totalDistance != null) {
-            if (!summary.isEmpty()) summary.append(" · ");
+            if (summary.length() > 0) summary.append(" · ");
             summary.append(totalDistance);
         }
-        return summary.isEmpty() ? "Oferta Uber" : summary.toString();
+        return summary.length() == 0 ? "Oferta Uber" : summary.toString();
     }
 
     private int color(Signal signal) {
@@ -292,5 +346,18 @@ public final class OverlayController {
                 // O sistema pode remover a janela durante a desconexão do serviço.
             }
         }
+        visible = false;
+    }
+
+    private static String displayFingerprint(TripOffer offer, RideMetrics metrics,
+                                             ClassificationResult classification) {
+        if (offer == null) return "empty";
+        return String.valueOf(offer.offeredAmount()) + '|' + offer.category() + '|'
+                + offer.passengerRating() + '|' + offer.pickupDistanceKm() + '|'
+                + offer.pickupEtaMinutes() + '|' + offer.tripDistanceKm() + '|'
+                + offer.tripDurationMinutes() + '|' + (metrics == null ? "" : metrics.totalDistanceKm()) + '|'
+                + (metrics == null ? "" : metrics.totalDurationMinutes()) + '|'
+                + (classification == null ? "" : classification.overallSignal()) + '|'
+                + (classification != null && classification.incomplete());
     }
 }

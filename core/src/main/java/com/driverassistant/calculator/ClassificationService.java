@@ -50,6 +50,7 @@ public final class ClassificationService {
         }
 
         int enabledCount = 0;
+        int enabledFinancialCount = 0;
         int knownCount = 0;
         boolean missing = false;
         boolean red = false;
@@ -60,6 +61,7 @@ public final class ClassificationService {
         for (IndicatorResult item : results.values()) {
             if (!item.enabled()) continue;
             enabledCount++;
+            if (item.indicator().isFinancial()) enabledFinancialCount++;
             Signal signal = item.signal();
             if (signal == Signal.UNKNOWN) {
                 missing = true;
@@ -77,14 +79,15 @@ public final class ClassificationService {
             }
         }
 
-        if (enabledCount == 0 || knownCount == 0) {
+        if (enabledCount == 0 || enabledFinancialCount == 0 || knownCount == 0) {
             return new ClassificationResult(results, Signal.UNKNOWN, true, false);
         }
 
         Signal overall;
-        if (strategy == ClassificationStrategy.FINANCIAL_GREEN) {
+        if (missing) {
+            overall = Signal.UNKNOWN;
+        } else if (strategy == ClassificationStrategy.FINANCIAL_GREEN) {
             if (red) overall = Signal.RED;
-            else if (missing) overall = Signal.YELLOW;
             else if (financialGreen) overall = Signal.GREEN;
             else overall = Signal.YELLOW;
         } else {

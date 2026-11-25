@@ -63,7 +63,10 @@
                 <TextView android:id="@+id/accessibility_status" style="@style/StatusLine" />
                 <TextView android:id="@+id/permission_status" style="@style/StatusLine" />
                 <TextView android:id="@+id/monitoring_status" style="@style/StatusLine" />
+                <TextView android:id="@+id/uber_seen_status" style="@style/StatusLine" />
                 <TextView android:id="@+id/uber_status" style="@style/StatusLine" />
+                <TextView android:id="@+id/last_uber_event_status" style="@style/StatusLine" />
+                <TextView android:id="@+id/active_offer_status" style="@style/StatusLine" />
                 <TextView android:id="@+id/overlay_status" style="@style/StatusLine" />
                 <TextView
                     android:layout_width="match_parent"
@@ -112,6 +115,13 @@
                     android:textColor="@color/ink"
                     android:textSize="16sp"
                     android:textStyle="bold" />
+                <TextView
+                    android:id="@+id/incomplete_offer_count"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:paddingTop="4dp"
+                    android:textColor="@color/ink_secondary"
+                    android:textSize="14sp" />
                 <TextView
                     android:id="@+id/last_offer"
                     android:layout_width="match_parent"
@@ -172,6 +182,12 @@
             android:layout_height="wrap_content"
             android:text="@string/test_semaphore" />
         <com.google.android.material.button.MaterialButton
+            android:id="@+id/test_overlay_button"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/test_overlay" />
+        <com.google.android.material.button.MaterialButton
             android:id="@+id/settings_button"
             style="@style/Widget.Material3.Button.OutlinedButton"
             android:layout_width="match_parent"
@@ -183,5 +199,11 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="@string/export_logs" />
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/clear_diagnostics_button"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/clear_diagnostics" />
     </LinearLayout>
 </ScrollView>
