@@ -73,7 +73,7 @@ public final class OfferParser {
             starts.add(composedText.length());
             composedText.append(visibleText);
             lines.add(visibleText);
-            String resourceCue = node == null || node.resourceId() == null ? ""
+            String resourceCue = node == null || !node.visibleToUser() || node.resourceId() == null ? ""
                     : node.resourceId().replaceAll("[^a-zA-Z0-9]+", " ");
             contextLines.add((visibleText + " " + resourceCue).trim());
         }
@@ -168,9 +168,12 @@ public final class OfferParser {
         String lowerAll = allText;
         boolean categoryContext = category != null;
         if (lowerAll.contains("mapa") && !explicitOffer) return rejected("screen_context:map");
-        boolean hasParsedOfferData = amount != null || categoryContext || rating != null
-                || pickupDistance != null || pickupMinutes != null || tripDistance != null || tripMinutes != null;
-        boolean hasOfferContext = (hasAcceptanceAction && hasParsedOfferData) || (labeledOffer && amount != null);
+        boolean hasSecondaryOfferData = categoryContext || rating != null || pickupDistance != null
+                || pickupMinutes != null || tripDistance != null || tripMinutes != null;
+        // A fare alone is not enough: map surge bubbles and other app amounts often coexist
+        // with stale action labels in accessibility snapshots. Require one independent field.
+        boolean hasOfferContext = amount != null && hasSecondaryOfferData
+                && (hasAcceptanceAction || labeledOffer);
         if (!hasOfferContext) return rejected("missing_accept_action_or_labeled_fare");
 
         TripOffer offer = new TripOffer(amount, category, rating, pickupDistance, pickupMinutes,
@@ -210,7 +213,7 @@ public final class OfferParser {
             String ownText = lines.get(nodeIndex).toLowerCase(Locale.ROOT);
             int ownValueIndex = matcher.start() - starts.get(nodeIndex);
             int excludedDistance = nearestCueDistance(ownText, ownValueIndex, EXCLUDED_MONEY_CONTEXT);
-            String ownId = valueNode == null || valueNode.resourceId() == null ? ""
+            String ownId = valueNode == null || !valueNode.visibleToUser() || valueNode.resourceId() == null ? ""
                     : valueNode.resourceId().toLowerCase(Locale.ROOT);
             if (excludedDistance != Integer.MAX_VALUE
                     || containsAny(ownId, "bonus", "surge", "promotion", "incentive", "pickup_fee", "dynamic")) continue;
@@ -218,7 +221,7 @@ public final class OfferParser {
             StringBuilder resourceContext = new StringBuilder();
             for (int index = fromNode; index <= toNode; index++) {
                 AccessibilityNode node = nodes.get(index);
-                if (node != null && node.resourceId() != null) resourceContext.append(' ')
+                if (node != null && node.visibleToUser() && node.resourceId() != null) resourceContext.append(' ')
                         .append(node.resourceId().toLowerCase(Locale.ROOT));
             }
             String ids = resourceContext.toString();
@@ -264,7 +267,8 @@ public final class OfferParser {
         List<Integer> actions = new ArrayList<>();
         for (int index = 0; index < source.size(); index++) {
             AccessibilityNode node = source.get(index);
-            if (node != null && containsAny(node.accessibleText().toLowerCase(Locale.ROOT), "aceitar", "selecionar")) {
+            if (node != null && node.visibleToUser()
+                    && containsAny(node.accessibleText().toLowerCase(Locale.ROOT), "aceitar", "selecionar")) {
                 actions.add(index);
             }
         }
@@ -303,7 +307,8 @@ public final class OfferParser {
             int parent = node.parentOrder() >= 0 && node.parentOrder() < remap.length
                     ? remap[node.parentOrder()] : -1;
             scoped.add(new AccessibilityNode(node.text(), node.contentDescription(), node.resourceId(),
-                    node.className(), parent, Math.max(0, node.depth() - baseDepth), scopedOrder));
+                    node.className(), parent, Math.max(0, node.depth() - baseDepth), scopedOrder,
+                    node.visibleToUser()));
         }
         return scoped;
     }
@@ -329,7 +334,7 @@ public final class OfferParser {
         StringBuilder text = new StringBuilder();
         for (int index : indices) {
             AccessibilityNode node = nodes.get(index);
-            if (node == null) continue;
+            if (node == null || !node.visibleToUser()) continue;
             if (!text.isEmpty()) text.append(' ');
             text.append(node.accessibleText()).append(' ');
             if (node.resourceId() != null) text.append(node.resourceId()).append(' ');
@@ -403,7 +408,8 @@ public final class OfferParser {
         int nodeIndex = nodeIndexAt(starts, valueIndex);
         if (nodeIndex >= 0 && nodeIndex < nodes.size()) {
             AccessibilityNode node = nodes.get(nodeIndex);
-            String id = node == null || node.resourceId() == null ? "" : node.resourceId().toLowerCase(Locale.ROOT);
+            String id = node == null || !node.visibleToUser() || node.resourceId() == null
+                    ? "" : node.resourceId().toLowerCase(Locale.ROOT);
             int resourceKind = resourceTravelContext(id);
             if (resourceKind != 0) return resourceKind;
 
@@ -416,7 +422,7 @@ public final class OfferParser {
             while (parent >= 0 && parent < nodes.size() && levels++ < 8) {
                 AccessibilityNode parentNode = nodes.get(parent);
                 if (parentNode == null) break;
-                int parentKind = resourceTravelContext(parentNode.resourceId() == null ? ""
+                int parentKind = resourceTravelContext(!parentNode.visibleToUser() || parentNode.resourceId() == null ? ""
                         : parentNode.resourceId().toLowerCase(Locale.ROOT));
                 if (parentKind == 0) parentKind = travelContextInText(parentNode.accessibleText().toLowerCase(Locale.ROOT), 0);
                 if (parentKind != 0) return parentKind;
@@ -452,7 +458,7 @@ public final class OfferParser {
             if (index == nodeIndex) continue;
             AccessibilityNode nearby = nodes.get(index);
             if (nearby == null) continue;
-            int kind = resourceTravelContext(nearby.resourceId() == null ? ""
+            int kind = resourceTravelContext(!nearby.visibleToUser() || nearby.resourceId() == null ? ""
                     : nearby.resourceId().toLowerCase(Locale.ROOT));
             if (kind == 0) kind = travelContextInText(nearby.accessibleText().toLowerCase(Locale.ROOT), 0);
             if (kind == 0) continue;

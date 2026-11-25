@@ -106,6 +106,31 @@ public final class OfferParserTest {
         assertEquals("missing_accept_action_or_labeled_fare", parsed.rejectionReason());
     }
 
+    @Test public void hiddenStaleAcceptAndOfferLabelsDoNotTurnMapSurgeIntoAnOffer() {
+        OfferParseResult parsed = parser.parseNodes(List.of(
+                new AccessibilityNode("Tela Uber", null, "root", "FrameLayout", -1, 0, 0),
+                new AccessibilityNode("Ficar online", null, "home/go_online", "Button", 0, 1, 1),
+                new AccessibilityNode("Oportunidades", null, "home/opportunities", "TextView", 0, 1, 2),
+                new AccessibilityNode("UberX", null, "map/category", "TextView", 0, 1, 3),
+                new AccessibilityNode("+R$ 12,75", null, "map/promotion", "TextView", 0, 1, 4),
+                new AccessibilityNode("Aceitar", null, "request/accept", "Button", 0, 1, 5, false),
+                new AccessibilityNode("Oferta Uber", null, "request/title", "TextView", 0, 1, 6, false)));
+
+        assertFalse(parsed.accepted());
+        assertEquals("screen_context:offline_opportunity_map", parsed.rejectionReason());
+    }
+
+    @Test public void fareAndVisibleActionWithoutIndependentOfferDataAreRejected() {
+        OfferParseResult parsed = parser.parseNodes(List.of(
+                new AccessibilityNode("Oferta Uber", null, "request/title", "TextView", 0, 1, 0),
+                new AccessibilityNode("R$ 14,75", null, "map/promotion", "TextView", 0, 1, 1),
+                new AccessibilityNode("Aceitar", null, "request/accept", "Button", 0, 1, 2),
+                new AccessibilityNode("UberX", null, "request/category", "TextView", 0, 1, 3, false)));
+
+        assertFalse(parsed.accepted());
+        assertEquals("missing_accept_action_or_labeled_fare", parsed.rejectionReason());
+    }
+
     @Test public void parsesSimulatedUberXRequestInsteadOfMapBonusAndEstimate() {
         TripOffer offer = parser.parse(List.of(
                 "UberX Exclusivo", "R$ 36,03", "Est. de R$ 1,72/km", "★ 5,00 (19)",

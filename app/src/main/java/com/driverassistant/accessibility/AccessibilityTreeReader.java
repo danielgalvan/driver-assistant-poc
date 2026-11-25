@@ -28,7 +28,7 @@ public final class AccessibilityTreeReader {
             int textLength = node.text() == null ? 0 : node.text().length();
             int descriptionLength = node.contentDescription() == null ? 0 : node.contentDescription().length();
             result.add("#" + node.order() + " parent=" + node.parentOrder() + " depth=" + node.depth()
-                    + " class=" + className + " id=" + id + " textChars=" + textLength
+                    + " class=" + className + " visible=" + node.visibleToUser() + " id=" + id + " textChars=" + textLength
                     + " descriptionChars=" + descriptionLength);
         }
         return result;
@@ -43,7 +43,7 @@ public final class AccessibilityTreeReader {
             CharSequence description = node.getContentDescription();
             output.add(new AccessibilityNode(toString(text), toString(description),
                     node.getViewIdResourceName(), node.getClassName() == null ? null : node.getClassName().toString(),
-                    parentOrder, depth, order));
+                    parentOrder, depth, order, node.isVisibleToUser()));
             for (int index = 0; index < node.getChildCount() && output.size() < MAX_NODES; index++) {
                 AccessibilityNodeInfo child = node.getChild(index);
                 walk(child, order, depth + 1, output);
