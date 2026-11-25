@@ -51,11 +51,17 @@ As configurações e diagnósticos usam `SharedPreferences` nesta etapa. O contr
 ## Pré-requisitos
 
 - JDK 21 configurado em `JAVA_HOME`
-- Android SDK com a plataforma API 37 Preview e Android SDK Build Tools 37
+- Android SDK com a plataforma API 37.0 Preview e Android SDK Build Tools 37
 - ADB para instalar o APK em aparelho físico
 - Na primeira compilação, acesso aos repositórios Google Maven e Maven Central para baixar o Gradle e as dependências
 
-Combinação usada nesta revisão: Java 21, Gradle Wrapper 9.6.0, Android Gradle Plugin 9.5.0, `compileSdk 37`, `targetSdk 36` e `minSdk 29`. API 37 é o SDK Preview do Android 17; portanto, a CI o instala pelo canal Canary (`sdkmanager --channel=3`). A compilação falhava antes porque o comando consultava apenas o canal estável, e não por licenças: o log do GitHub confirma que as licenças foram aceitas. O AGP 9.5.0 suporta API 37 ([notas do AGP 9.5.0](https://developer.android.com/build/releases/agp-9-5-0-release-notes)); o SDK Manager documenta `--channel=3` para incluir pacotes Canary ([documentação do sdkmanager](https://developer.android.com/tools/sdkmanager)); Gradle suporta execução em Java 21 ([compatibilidade do Gradle](https://docs.gradle.org/current/userguide/compatibility.html)).
+Combinação usada nesta revisão: Java 21, Gradle Wrapper 9.6.0, Android Gradle Plugin 9.5.0, `compileSdk 37`, `targetSdk 36` e `minSdk 29`. O pacote do Android 17 Preview para API 37.0 tem o identificador `platforms;android-37.0` (não `platforms;android-37`); a CI o instala pelo canal Canary (`sdkmanager --channel=3`). O log da execução confirma que as licenças foram aceitas e que o erro era o identificador inexistente do pacote. O AGP 9.5.0 suporta API 37 ([notas do AGP 9.5.0](https://developer.android.com/build/releases/agp-9-5-0-release-notes)); o SDK Manager documenta `--channel=3` para incluir pacotes Canary ([documentação do sdkmanager](https://developer.android.com/tools/sdkmanager)); Gradle suporta execução em Java 21 ([compatibilidade do Gradle](https://docs.gradle.org/current/userguide/compatibility.html)).
+
+Para instalar os pacotes manualmente no Windows, use o SDK Manager do Android Studio ou execute no terminal em que `sdkmanager` está no `PATH`:
+
+```powershell
+sdkmanager --channel=3 "platforms;android-37.0" "build-tools;37.0.0"
+```
 
 Confira as ferramentas:
 
