@@ -8,7 +8,7 @@
     <string name="status_accessibility">Serviço de acessibilidade: %1$s</string>
     <string name="status_monitoring">Monitoramento: %1$s</string>
     <string name="status_uber">Uber Driver detectado: %1$s</string>
-    <string name="status_overlay">Cartão flutuante: %1$s</string>
+    <string name="status_overlay">Cartão flutuante: %1$s (configuração: %2$s)</string>
     <string name="permission_status">Permissões necessárias — acessibilidade: %1$s; sobreposição: integrada ao serviço</string>
     <string name="accessibility_disclosure">Com o monitoramento ativado, o app lê textos acessíveis do Uber Driver para calcular a oferta localmente. Não envia dados, não guarda nomes ou endereços e não aceita nem recusa corridas.</string>
     <string name="yes">Sim</string>
@@ -19,13 +19,50 @@
     <string name="monitoring_start_button">MONITORAMENTO DESATIVADO\nToque para ativar</string>
     <string name="monitoring_stop_button">MONITORAMENTO ATIVADO\nToque para desativar</string>
     <string name="detected_offers">Ofertas reais detectadas: %1$d</string>
+    <string name="incomplete_offers">Ofertas incompletas: %1$d</string>
     <string name="last_offer">Última oferta: %1$s</string>
+    <string name="uber_seen_before">Uber Driver visto anteriormente: %1$s</string>
+    <string name="uber_foreground">Uber Driver em primeiro plano agora: %1$s</string>
+    <string name="last_uber_event">Último evento da Uber: %1$s</string>
+    <string name="active_offer_status">Oferta ativa: %1$s</string>
+    <string name="clear_diagnostics">Limpar dados de diagnóstico</string>
+    <string name="confirm_clear_diagnostics">As contagens, o último resumo da oferta e os eventos locais serão apagados.</string>
+    <string name="diagnostics_cleared">Dados de diagnóstico limpos</string>
     <string name="none_yet">Nenhuma</string>
     <string name="recent_events">Eventos recentes</string>
     <string name="test_semaphore">Testar semáforo (simulado)</string>
+    <string name="test_overlay">Testar cartão flutuante (simulado)</string>
+    <string name="overlay_simulation_title">Cenário de cartão simulado</string>
+    <string-array name="overlay_simulation_labels">
+        <item>Oferta verde</item>
+        <item>Oferta amarela</item>
+        <item>Oferta vermelha</item>
+        <item>Oferta incompleta</item>
+        <item>Nota indisponível</item>
+        <item>Oferta atualizada</item>
+        <item>Oferta duplicada</item>
+        <item>Oferta desaparecendo</item>
+    </string-array>
+    <string-array name="overlay_simulation_values">
+        <item>green</item>
+        <item>yellow</item>
+        <item>red</item>
+        <item>incomplete</item>
+        <item>no_rating</item>
+        <item>updated</item>
+        <item>duplicate</item>
+        <item>disappearing</item>
+    </string-array>
+    <string name="simulation_requires_service">Conecte o serviço, ative o monitoramento e não deixe uma oferta real ativa para testar o cartão.</string>
     <string name="export_logs">Exportar logs de diagnóstico</string>
     <string name="open_semaphore_settings">Configurações do semáforo e cartão</string>
     <string name="simulation_label">SIMULAÇÃO — não é uma oferta real</string>
+    <string name="show_amount">Valor total da oferta</string>
+    <string name="offer_disappearance_tolerance">Tolerância para desaparecimento (ms)</string>
+    <string name="offer_disappearance_tolerance_hint">De 250 a 10000 ms</string>
+    <string name="diagnostics_title">Diagnóstico</string>
+    <string name="detailed_diagnostics">Diagnóstico detalhado da estrutura acessível</string>
+    <string name="detailed_diagnostics_disclosure">Registra apenas classes, IDs de recurso e comprimentos de texto; nomes, endereços e conteúdo textual não são armazenados.</string>
     <string name="settings_title">Configurações</string>
     <string name="thresholds_title">Limites do semáforo</string>
     <string name="red_below">Vermelho abaixo de</string>

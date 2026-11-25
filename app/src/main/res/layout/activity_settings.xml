@@ -75,6 +75,7 @@
             <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="16dp">
                 <TextView style="@style/SettingsSectionTitle" android:text="@string/overlay_title" />
                 <com.google.android.material.checkbox.MaterialCheckBox android:id="@+id/overlay_enabled" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/enable_overlay" />
+                <com.google.android.material.checkbox.MaterialCheckBox android:id="@+id/show_amount" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/show_amount" />
                 <com.google.android.material.textfield.TextInputLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="@string/overlay_duration">
                     <com.google.android.material.textfield.TextInputEditText android:id="@+id/overlay_duration" android:inputType="number" android:layout_width="match_parent" android:layout_height="wrap_content" />
                 </com.google.android.material.textfield.TextInputLayout>
@@ -90,6 +91,22 @@
                 <com.google.android.material.checkbox.MaterialCheckBox android:id="@+id/show_total_distance" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/show_total_distance" />
                 <com.google.android.material.checkbox.MaterialCheckBox android:id="@+id/show_total_time" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/show_total_time" />
                 <com.google.android.material.checkbox.MaterialCheckBox android:id="@+id/show_overall" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/show_overall" />
+                <TextView style="@style/SettingsFieldLabel" android:text="@string/offer_disappearance_tolerance" />
+                <com.google.android.material.textfield.TextInputLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="@string/offer_disappearance_tolerance_hint">
+                    <com.google.android.material.textfield.TextInputEditText android:id="@+id/disappearance_tolerance" android:inputType="number" android:layout_width="match_parent" android:layout_height="wrap_content" />
+                </com.google.android.material.textfield.TextInputLayout>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            app:cardCornerRadius="18dp">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="16dp">
+                <TextView style="@style/SettingsSectionTitle" android:text="@string/diagnostics_title" />
+                <com.google.android.material.checkbox.MaterialCheckBox android:id="@+id/detailed_diagnostics" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/detailed_diagnostics" />
+                <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/detailed_diagnostics_disclosure" android:textColor="@color/ink_secondary" android:textSize="12sp" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 

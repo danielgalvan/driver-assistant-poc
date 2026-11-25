@@ -12,6 +12,7 @@ import com.driverassistant.config.ConfigRepository;
 import com.driverassistant.config.ThresholdConfig;
 import com.driverassistant.domain.ClassificationStrategy;
 import com.driverassistant.parser.LocalizedNumberParser;
+import com.driverassistant.service.UberAccessibilityService;
 import com.driverassistant.util.DiagnosticLogStore;
 import com.google.android.material.checkbox.MaterialCheckBox;
 import com.google.android.material.textfield.TextInputEditText;
@@ -26,10 +27,13 @@ public final class SettingsActivity extends AppCompatActivity {
     private TextInputEditText ratingRed;
     private TextInputEditText ratingGreen;
     private TextInputEditText overlayDuration;
+    private TextInputEditText disappearanceTolerance;
     private MaterialCheckBox perKmEnabled;
     private MaterialCheckBox perHourEnabled;
     private MaterialCheckBox ratingEnabled;
     private MaterialCheckBox overlayEnabled;
+    private MaterialCheckBox showAmount;
+    private MaterialCheckBox detailedDiagnostics;
     private MaterialCheckBox showCategory;
     private MaterialCheckBox showPerKm;
     private MaterialCheckBox showPerHour;
@@ -60,10 +64,13 @@ public final class SettingsActivity extends AppCompatActivity {
         ratingRed = findViewById(R.id.rating_red);
         ratingGreen = findViewById(R.id.rating_green);
         overlayDuration = findViewById(R.id.overlay_duration);
+        disappearanceTolerance = findViewById(R.id.disappearance_tolerance);
         perKmEnabled = findViewById(R.id.enable_per_km);
         perHourEnabled = findViewById(R.id.enable_per_hour);
         ratingEnabled = findViewById(R.id.enable_rating);
         overlayEnabled = findViewById(R.id.overlay_enabled);
+        showAmount = findViewById(R.id.show_amount);
+        detailedDiagnostics = findViewById(R.id.detailed_diagnostics);
         showCategory = findViewById(R.id.show_category);
         showPerKm = findViewById(R.id.show_per_km);
         showPerHour = findViewById(R.id.show_per_hour);
@@ -101,8 +108,10 @@ public final class SettingsActivity extends AppCompatActivity {
 
         overlayEnabled.setChecked(config.overlayEnabled());
         overlayDuration.setText(Integer.toString(config.overlayDurationSeconds()));
+        disappearanceTolerance.setText(Long.toString(config.offerDisappearanceToleranceMillis()));
         positionSpinner.setSelection(positionIndex(config.overlayPosition()));
         showCategory.setChecked(config.showCategory());
+        showAmount.setChecked(config.showAmount());
         showPerKm.setChecked(config.showPerKm());
         showPerHour.setChecked(config.showPerHour());
         showRating.setChecked(config.showRating());
@@ -111,6 +120,7 @@ public final class SettingsActivity extends AppCompatActivity {
         showTotalDistance.setChecked(config.showTotalDistance());
         showTotalTime.setChecked(config.showTotalTime());
         showOverall.setChecked(config.showOverall());
+        detailedDiagnostics.setChecked(config.detailedDiagnosticsEnabled());
     }
 
     private void save() {
@@ -121,8 +131,9 @@ public final class SettingsActivity extends AppCompatActivity {
         Double ratingMin = number(ratingRed);
         Double ratingMax = number(ratingGreen);
         Integer seconds = integer(overlayDuration);
+        Integer tolerance = integer(disappearanceTolerance);
         if (kmRed == null || kmGreen == null || hourRed == null || hourGreen == null
-                || ratingMin == null || ratingMax == null || seconds == null) {
+                || ratingMin == null || ratingMax == null || seconds == null || tolerance == null) {
             showInvalid();
             return;
         }
@@ -133,7 +144,8 @@ public final class SettingsActivity extends AppCompatActivity {
         ThresholdConfig thresholds = new ThresholdConfig(kmRed, kmGreen, hourRed, hourGreen,
                 ratingMin, ratingMax, perKmEnabled.isChecked(), perHourEnabled.isChecked(),
                 ratingEnabled.isChecked(), selectedStrategy);
-        if (ratingMin > 5 || ratingMax > 5 || seconds < 1 || seconds > 120 || !thresholds.isValid()) {
+        if (ratingMin > 5 || ratingMax > 5 || seconds < 1 || seconds > 120
+                || tolerance < 250 || tolerance > 10_000 || !thresholds.isValid()) {
             showInvalid();
             return;
         }
@@ -144,14 +156,16 @@ public final class SettingsActivity extends AppCompatActivity {
 
         String position = POSITIONS[Math.max(0, Math.min(positionSpinner.getSelectedItemPosition(), POSITIONS.length - 1))];
         boolean overlaySaved = config.saveOverlaySettings(overlayEnabled.isChecked(), seconds, position,
-                showCategory.isChecked(), showRating.isChecked(), showPickupDistance.isChecked(),
+                showAmount.isChecked(), showCategory.isChecked(), showRating.isChecked(), showPickupDistance.isChecked(),
                 showTripDistance.isChecked(), showTotalDistance.isChecked(), showTotalTime.isChecked(),
-                showPerKm.isChecked(), showPerHour.isChecked(), showOverall.isChecked());
+                showPerKm.isChecked(), showPerHour.isChecked(), showOverall.isChecked(), tolerance);
         if (!overlaySaved) {
             showInvalid();
             return;
         }
 
+        config.setDetailedDiagnosticsEnabled(detailedDiagnostics.isChecked());
+        UberAccessibilityService.refreshOverlayConfiguration();
         DiagnosticLogStore.record(this, "DA_CONFIG", "CONFIG_SAVED", "thresholds_and_overlay=true");
         Toast.makeText(this, R.string.settings_saved, Toast.LENGTH_SHORT).show();
         finish();

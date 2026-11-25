@@ -12,6 +12,7 @@ import android.view.View;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 
 import androidx.appcompat.app.AppCompatActivity;
 
@@ -45,8 +46,12 @@ public final class MainActivity extends AppCompatActivity {
     private TextView monitoringStatus;
     private MaterialButton toggleMonitoringButton;
     private TextView uberStatus;
+    private TextView uberSeenStatus;
+    private TextView lastUberEventStatus;
+    private TextView activeOfferStatus;
     private TextView overlayStatus;
     private TextView offerCount;
+    private TextView incompleteOfferCount;
     private TextView lastOffer;
     private TextView recentEvents;
     private MaterialCardView simulationCard;
@@ -70,8 +75,12 @@ public final class MainActivity extends AppCompatActivity {
         monitoringStatus = findViewById(R.id.monitoring_status);
         toggleMonitoringButton = findViewById(R.id.toggle_monitoring_button);
         uberStatus = findViewById(R.id.uber_status);
+        uberSeenStatus = findViewById(R.id.uber_seen_status);
+        lastUberEventStatus = findViewById(R.id.last_uber_event_status);
+        activeOfferStatus = findViewById(R.id.active_offer_status);
         overlayStatus = findViewById(R.id.overlay_status);
         offerCount = findViewById(R.id.offer_count);
+        incompleteOfferCount = findViewById(R.id.incomplete_offer_count);
         lastOffer = findViewById(R.id.last_offer);
         recentEvents = findViewById(R.id.recent_events);
         simulationCard = findViewById(R.id.simulation_card);
@@ -83,7 +92,9 @@ public final class MainActivity extends AppCompatActivity {
         findViewById(R.id.settings_button).setOnClickListener(view ->
                 startActivity(new Intent(this, SettingsActivity.class)));
         findViewById(R.id.simulate_button).setOnClickListener(view -> runSimulation());
+        findViewById(R.id.test_overlay_button).setOnClickListener(view -> chooseOverlayScenario());
         findViewById(R.id.export_button).setOnClickListener(view -> exportLogs());
+        findViewById(R.id.clear_diagnostics_button).setOnClickListener(view -> clearDiagnostics());
     }
 
     @Override protected void onResume() {
@@ -116,11 +127,20 @@ public final class MainActivity extends AppCompatActivity {
         toggleMonitoringButton.setBackgroundTintList(ColorStateList.valueOf(getColor(
                 monitoring ? R.color.signal_red : R.color.action_green)));
         toggleMonitoringButton.setTextColor(getColor(android.R.color.white));
-        uberStatus.setText(getString(R.string.status_uber,
+        uberSeenStatus.setText(getString(R.string.uber_seen_before,
                 DiagnosticLogStore.uberDetected(this) ? getString(R.string.yes) : getString(R.string.no)));
+        uberStatus.setText(getString(R.string.uber_foreground,
+                UberAccessibilityService.isUberForeground() ? getString(R.string.yes) : getString(R.string.no)));
+        String lastUberEventValue = DiagnosticLogStore.lastUberEvent(this);
+        lastUberEventStatus.setText(getString(R.string.last_uber_event,
+                lastUberEventValue == null ? getString(R.string.none_yet) : lastUberEventValue));
+        activeOfferStatus.setText(getString(R.string.active_offer_status,
+                UberAccessibilityService.hasActiveOffer() ? getString(R.string.yes) : getString(R.string.no)));
         overlayStatus.setText(getString(R.string.status_overlay,
+                UberAccessibilityService.isOverlayVisible() ? getString(R.string.enabled) : getString(R.string.disabled),
                 config.overlayEnabled() ? getString(R.string.enabled) : getString(R.string.disabled)));
         offerCount.setText(getString(R.string.detected_offers, DiagnosticLogStore.offerCount(this)));
+        incompleteOfferCount.setText(getString(R.string.incomplete_offers, DiagnosticLogStore.incompleteOfferCount(this)));
         String summary = DiagnosticLogStore.lastOffer(this);
         lastOffer.setText(getString(R.string.last_offer, summary == null ? getString(R.string.none_yet) : summary));
 
@@ -361,6 +381,33 @@ public final class MainActivity extends AppCompatActivity {
         send.putExtra(Intent.EXTRA_SUBJECT, "Driver Assistant — diagnóstico");
         send.putExtra(Intent.EXTRA_TEXT, DiagnosticLogStore.exportText(this));
         startActivity(Intent.createChooser(send, getString(R.string.logs_shared)));
+    }
+
+    private void chooseOverlayScenario() {
+        String[] labels = getResources().getStringArray(R.array.overlay_simulation_labels);
+        String[] values = getResources().getStringArray(R.array.overlay_simulation_values);
+        new MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.overlay_simulation_title)
+                .setItems(labels, (dialog, which) -> {
+                    if (!UberAccessibilityService.previewOverlayScenario(values[which])) {
+                        Toast.makeText(this, R.string.simulation_requires_service, Toast.LENGTH_LONG).show();
+                    }
+                })
+                .setNegativeButton(android.R.string.cancel, null)
+                .show();
+    }
+
+    private void clearDiagnostics() {
+        new MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.clear_diagnostics)
+                .setMessage(R.string.confirm_clear_diagnostics)
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton(android.R.string.ok, (dialog, which) -> {
+                    DiagnosticLogStore.clear(this);
+                    refreshScreen();
+                    Toast.makeText(this, R.string.diagnostics_cleared, Toast.LENGTH_SHORT).show();
+                })
+                .show();
     }
 
     private String money(Double value) {

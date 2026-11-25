@@ -72,6 +72,7 @@ public final class ConfigRepository {
     public boolean overlayEnabled() { return preferences.getBoolean("overlay_enabled", true); }
     public int overlayDurationSeconds() { return preferences.getInt("overlay_duration_seconds", 12); }
     public String overlayPosition() { return preferences.getString("overlay_position", "TOP_RIGHT"); }
+    public boolean showAmount() { return preferences.getBoolean("show_amount", true); }
     public boolean showCategory() { return preferences.getBoolean("show_category", false); }
     public boolean showRating() { return preferences.getBoolean("show_rating", true); }
     public boolean showPerKm() { return preferences.getBoolean("show_per_km", true); }
@@ -81,16 +82,26 @@ public final class ConfigRepository {
     public boolean showTripDistance() { return preferences.getBoolean("show_trip_distance", false); }
     public boolean showTotalDistance() { return preferences.getBoolean("show_total_distance", true); }
     public boolean showTotalTime() { return preferences.getBoolean("show_total_time", true); }
+    public long offerDisappearanceToleranceMillis() {
+        return preferences.getLong("offer_disappearance_tolerance_ms", 2_200L);
+    }
+    public boolean detailedDiagnosticsEnabled() { return preferences.getBoolean("detailed_diagnostics", false); }
+    public void setDetailedDiagnosticsEnabled(boolean enabled) {
+        preferences.edit().putBoolean("detailed_diagnostics", enabled).apply();
+    }
 
     public boolean saveOverlaySettings(boolean enabled, int durationSeconds, String position,
-                                       boolean category, boolean rating, boolean pickupDistance,
+                                       boolean amount, boolean category, boolean rating, boolean pickupDistance,
                                        boolean tripDistance, boolean totalDistance, boolean totalTime,
-                                       boolean perKm, boolean perHour, boolean overall) {
-        if (durationSeconds < 1 || durationSeconds > 120 || !isKnownPosition(position)) return false;
+                                       boolean perKm, boolean perHour, boolean overall,
+                                       long disappearanceToleranceMillis) {
+        if (durationSeconds < 1 || durationSeconds > 120 || !isKnownPosition(position)
+                || disappearanceToleranceMillis < 250 || disappearanceToleranceMillis > 10_000) return false;
         preferences.edit()
                 .putBoolean("overlay_enabled", enabled)
                 .putInt("overlay_duration_seconds", durationSeconds)
                 .putString("overlay_position", position)
+                .putBoolean("show_amount", amount)
                 .putBoolean("show_category", category)
                 .putBoolean("show_rating", rating)
                 .putBoolean("show_per_km", perKm)
@@ -100,6 +111,7 @@ public final class ConfigRepository {
                 .putBoolean("show_trip_distance", tripDistance)
                 .putBoolean("show_total_distance", totalDistance)
                 .putBoolean("show_total_time", totalTime)
+                .putLong("offer_disappearance_tolerance_ms", disappearanceToleranceMillis)
                 .apply();
         return true;
     }
