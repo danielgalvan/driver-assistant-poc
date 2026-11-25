@@ -92,9 +92,11 @@ public final class OfferParser {
                 "oferta r$", "oferta brl", "oferta da viagem", "oferta uber", "nova corrida", "nova oferta",
                 "chamada recebida", "valor da corrida", "valor da viagem");
         boolean explicitOffer = hasAcceptanceAction || labeledOffer;
-        Double amount = findOfferAmount(joinedText, lines, nodes, starts, explicitOffer);
         Double rating = findRating(contextLines);
         String category = findCategory(contextLines);
+        boolean structuredOfferCard = hasStructuredOfferCard(joinedText, category, rating);
+        boolean hasOfferSignal = explicitOffer || structuredOfferCard;
+        Double amount = findOfferAmount(joinedText, lines, nodes, starts, hasOfferSignal);
         Double pickupDistance = null;
         Double pickupMinutes = null;
         Double tripDistance = null;
@@ -141,19 +143,19 @@ public final class OfferParser {
 
         // Some offer cards expose two unlabeled time/distance pairs in visual order.
         // Use that order only when the same snapshot contains an explicit offer action.
-        if (explicitOffer && unassignedDistances.size() == 2 && pickupDistance == null && tripDistance == null) {
+        if (hasOfferSignal && unassignedDistances.size() == 2 && pickupDistance == null && tripDistance == null) {
             pickupDistance = unassignedDistances.get(0);
             tripDistance = unassignedDistances.get(1);
-        } else if (explicitOffer && unassignedDistances.size() == 1) {
+        } else if (hasOfferSignal && unassignedDistances.size() == 1) {
             if (pickupDistance == null && tripDistance != null) pickupDistance = unassignedDistances.get(0);
             else if (tripDistance == null && pickupDistance != null) tripDistance = unassignedDistances.get(0);
         }
-        if (explicitOffer && unassignedDurations.size() == 2 && !foundPickupDuration && !foundTripDuration) {
+        if (hasOfferSignal && unassignedDurations.size() == 2 && !foundPickupDuration && !foundTripDuration) {
             pickupDuration = unassignedDurations.get(0);
             foundPickupDuration = true;
             tripDuration = unassignedDurations.get(1);
             foundTripDuration = true;
-        } else if (explicitOffer && unassignedDurations.size() == 1) {
+        } else if (hasOfferSignal && unassignedDurations.size() == 1) {
             if (!foundPickupDuration && foundTripDuration) {
                 pickupDuration = unassignedDurations.get(0);
                 foundPickupDuration = true;
@@ -167,13 +169,13 @@ public final class OfferParser {
 
         String lowerAll = allText;
         boolean categoryContext = category != null;
-        if (lowerAll.contains("mapa") && !explicitOffer) return rejected("screen_context:map");
+        if (lowerAll.contains("mapa") && !hasOfferSignal) return rejected("screen_context:map");
         boolean hasSecondaryOfferData = categoryContext || rating != null || pickupDistance != null
                 || pickupMinutes != null || tripDistance != null || tripMinutes != null;
-        // A fare alone is not enough: map surge bubbles and other app amounts often coexist
-        // with stale action labels in accessibility snapshots. Require one independent field.
+        // A map can remain behind a request card even when its Accept button is not exposed.
+        // Accept that card only with a category and both pickup/trip distance and duration.
         boolean hasOfferContext = amount != null && hasSecondaryOfferData
-                && (hasAcceptanceAction || labeledOffer);
+                && (explicitOffer || structuredOfferCard);
         if (!hasOfferContext) return rejected("missing_accept_action_or_labeled_fare");
 
         TripOffer offer = new TripOffer(amount, category, rating, pickupDistance, pickupMinutes,
@@ -199,6 +201,8 @@ public final class OfferParser {
         int bestScore = Integer.MIN_VALUE;
         Matcher matcher = MONEY.matcher(joinedText);
         while (matcher.find()) {
+            // Uber's map promotions are displayed as +R$ values, while the request fare is not.
+            if (matcher.start() > 0 && joinedText.charAt(matcher.start() - 1) == '+') continue;
             int nodeIndex = nodeIndexAt(starts, matcher.start());
             if (nodeIndex < 0 || nodeIndex >= nodes.size()) continue;
             int fromNode = Math.max(0, nodeIndex - 3);
@@ -251,6 +255,23 @@ public final class OfferParser {
         String after = text.substring(end, Math.min(text.length(), end + 8)).toLowerCase(Locale.ROOT);
         return before.contains("est.") || before.contains("estimativa")
                 || after.startsWith("/km") || before.contains("por km");
+    }
+
+    private static boolean hasStructuredOfferCard(String text, String category, Double rating) {
+        if (category == null) return false;
+        int distances = 0;
+        Matcher distanceMatcher = DISTANCE.matcher(text);
+        while (distanceMatcher.find()) {
+            if (!isEstimatedPerUnit(text, distanceMatcher.start(), distanceMatcher.end())) distances++;
+        }
+        int durations = 0;
+        Matcher durationMatcher = DURATION.matcher(text);
+        while (durationMatcher.find()) {
+            if (!isThresholdDuration(text, durationMatcher.start())) durations++;
+        }
+        String lower = text.toLowerCase(Locale.ROOT);
+        boolean labeledRoute = containsAny(lower, PICKUP_CUES) && containsAny(lower, TRIP_CUES);
+        return distances >= 2 && durations >= 2 && (rating != null || labeledRoute);
     }
 
     private static boolean isThresholdDuration(String text, int start) {
