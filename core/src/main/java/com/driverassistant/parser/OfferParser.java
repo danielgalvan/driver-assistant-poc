@@ -88,9 +88,10 @@ public final class OfferParser {
                 && containsAny(allText, "oportunidades", "oportunidade", "bônus por região", "bonus por regiao");
         if (opportunityMap && !hasAcceptanceAction) return rejected("screen_context:offline_opportunity_map");
 
-        boolean explicitOffer = hasAcceptanceAction || containsAny(allText,
+        boolean labeledOffer = containsAny(allText,
                 "oferta r$", "oferta brl", "oferta da viagem", "oferta uber", "nova corrida", "nova oferta",
                 "chamada recebida", "valor da corrida", "valor da viagem");
+        boolean explicitOffer = hasAcceptanceAction || labeledOffer;
         Double amount = findOfferAmount(joinedText, lines, nodes, starts, explicitOffer);
         Double rating = findRating(contextLines);
         String category = findCategory(contextLines);
@@ -165,11 +166,12 @@ public final class OfferParser {
         if (foundTripDuration) tripMinutes = tripDuration;
 
         String lowerAll = allText;
-        boolean travelContext = containsAny(lowerAll, PICKUP_CUES) || containsAny(lowerAll, TRIP_CUES);
         boolean categoryContext = category != null;
         if (lowerAll.contains("mapa") && !explicitOffer) return rejected("screen_context:map");
-        boolean hasOfferContext = explicitOffer || (categoryContext && (amount != null || travelContext));
-        if (!hasOfferContext) return rejected("no_offer_context");
+        boolean hasParsedOfferData = amount != null || categoryContext || rating != null
+                || pickupDistance != null || pickupMinutes != null || tripDistance != null || tripMinutes != null;
+        boolean hasOfferContext = (hasAcceptanceAction && hasParsedOfferData) || (labeledOffer && amount != null);
+        if (!hasOfferContext) return rejected("missing_accept_action_or_labeled_fare");
 
         TripOffer offer = new TripOffer(amount, category, rating, pickupDistance, pickupMinutes,
                 tripDistance, tripMinutes, null, null);

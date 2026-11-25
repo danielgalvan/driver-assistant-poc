@@ -95,6 +95,17 @@ public final class OfferParserTest {
         assertEquals("screen_context:offline_opportunity_map", parsed.rejectionReason());
     }
 
+    @Test public void doesNotPromoteAnUnlabeledMapAmountAndTravelCueToAnOffer() {
+        OfferParseResult parsed = parser.parseNodes(List.of(
+                AccessibilityNode.textOnly("UberX", 0),
+                AccessibilityNode.textOnly("Oportunidades", 1),
+                AccessibilityNode.textOnly("+R$ 14,75", 2),
+                AccessibilityNode.textOnly("5 min", 3),
+                AccessibilityNode.textOnly("12 km de viagem", 4)));
+        assertFalse(parsed.accepted());
+        assertEquals("missing_accept_action_or_labeled_fare", parsed.rejectionReason());
+    }
+
     @Test public void parsesSimulatedUberXRequestInsteadOfMapBonusAndEstimate() {
         TripOffer offer = parser.parse(List.of(
                 "UberX Exclusivo", "R$ 36,03", "Est. de R$ 1,72/km", "★ 5,00 (19)",
