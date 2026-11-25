@@ -83,6 +83,61 @@ public final class OfferParserTest {
         assertEquals(33.0, parsed.offer().tripDurationMinutes(), 0.0001);
     }
 
+    @Test public void rejectsSimulatedOfflineOpportunityMapAmountsAsOffers() {
+        OfferParseResult parsed = parser.parseNodes(List.of(
+                AccessibilityNode.textOnly("UberX", 0),
+                AccessibilityNode.textOnly("Ficar online", 1),
+                AccessibilityNode.textOnly("Oportunidades", 2),
+                AccessibilityNode.textOnly("+R$ 10,00", 3),
+                AccessibilityNode.textOnly("+R$ 3,50", 4),
+                AccessibilityNode.textOnly("+R$ 12,50", 5)));
+        assertFalse(parsed.accepted());
+        assertEquals("screen_context:offline_opportunity_map", parsed.rejectionReason());
+    }
+
+    @Test public void parsesSimulatedUberXRequestInsteadOfMapBonusAndEstimate() {
+        TripOffer offer = parser.parse(List.of(
+                "UberX Exclusivo", "R$ 36,03", "Est. de R$ 1,72/km", "★ 5,00 (19)",
+                "+R$ 7,75 incluído", "5 min (0,6 km)", "Local de embarque",
+                "45 minutos (20,3 km)", "Destino", "Viagem longa (mais de 30 min)", "Aceitar")).orElseThrow();
+        assertEquals(36.03, offer.offeredAmount(), 0.0001);
+        assertEquals("UberX", offer.category());
+        assertEquals(5.0, offer.passengerRating(), 0.0001);
+        assertEquals(0.6, offer.pickupDistanceKm(), 0.0001);
+        assertEquals(5.0, offer.pickupEtaMinutes(), 0.0001);
+        assertEquals(20.3, offer.tripDistanceKm(), 0.0001);
+        assertEquals(45.0, offer.tripDurationMinutes(), 0.0001);
+    }
+
+    @Test public void selectsTheRideCardSubtreeAndIgnoresOfflineMapPromotions() {
+        List<AccessibilityNode> simulatedTree = List.of(
+                new AccessibilityNode("Tela Uber", null, "root", "FrameLayout", -1, 0, 0),
+                new AccessibilityNode("Ficar online", null, "home/go_online", "Button", 0, 1, 1),
+                new AccessibilityNode("Oportunidades", null, "home/opportunities", "TextView", 0, 1, 2),
+                new AccessibilityNode("+R$ 12,50", null, "map/promotion", "TextView", 0, 1, 3),
+                new AccessibilityNode("Card da solicitação", null, "request/card", "LinearLayout", 0, 1, 4),
+                new AccessibilityNode("UberX", null, "request/category", "TextView", 4, 2, 5),
+                new AccessibilityNode("R$ 36,03", null, "request/fare", "TextView", 4, 2, 6),
+                new AccessibilityNode("Est. de R$ 1,72/km", null, "request/estimate", "TextView", 4, 2, 7),
+                new AccessibilityNode("5,00 (19)", null, "request/passenger_rating", "TextView", 4, 2, 8),
+                new AccessibilityNode("+R$ 7,75 incluído", null, "request/bonus", "TextView", 4, 2, 9),
+                new AccessibilityNode("5 min (0,6 km)", null, "request/pickup", "TextView", 4, 2, 10),
+                new AccessibilityNode("Local de embarque", null, "request/pickup_address", "TextView", 4, 2, 11),
+                new AccessibilityNode("45 minutos (20,3 km)", null, "request/trip", "TextView", 4, 2, 12),
+                new AccessibilityNode("Destino", null, "request/destination", "TextView", 4, 2, 13),
+                new AccessibilityNode("Viagem longa (mais de 30 min)", null, "request/long_trip", "TextView", 4, 2, 14),
+                new AccessibilityNode("Aceitar", null, "request/accept", "Button", 4, 2, 15));
+
+        OfferParseResult parsed = parser.parseNodes(simulatedTree);
+        assertTrue(parsed.accepted());
+        assertEquals(36.03, parsed.offer().offeredAmount(), 0.0001);
+        assertEquals("UberX", parsed.offer().category());
+        assertEquals(5.0, parsed.offer().pickupEtaMinutes(), 0.0001);
+        assertEquals(0.6, parsed.offer().pickupDistanceKm(), 0.0001);
+        assertEquals(45.0, parsed.offer().tripDurationMinutes(), 0.0001);
+        assertEquals(20.3, parsed.offer().tripDistanceKm(), 0.0001);
+    }
+
     @Test public void choosesOfferFareInsteadOfAnEarlierUnrelatedMoneyValue() {
         TripOffer offer = parser.parse(List.of("UberX", "Estimativa anterior R$ 8,00", "", "info", "painel", "corrida",
                 "Oferta selecionável",

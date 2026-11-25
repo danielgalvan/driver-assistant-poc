@@ -62,6 +62,7 @@ public final class OfferParser {
 
     public OfferParseResult parseNodes(List<AccessibilityNode> nodes) {
         if (nodes == null || nodes.isEmpty()) return rejected("empty_tree");
+        nodes = isolateOfferCard(nodes);
         List<String> lines = new ArrayList<>(nodes.size());
         List<String> contextLines = new ArrayList<>(nodes.size());
         List<Integer> starts = new ArrayList<>(nodes.size());
@@ -82,7 +83,14 @@ public final class OfferParser {
             if (allText.contains(excluded)) return rejected("screen_context:" + excluded.replace(' ', '_'));
         }
 
-        boolean explicitOffer = containsAny(allText, "oferta", "aceitar", "selecionar", "nova corrida", "chamada recebida");
+        boolean hasAcceptanceAction = containsAny(allText, "aceitar", "selecionar");
+        boolean opportunityMap = containsAny(allText, "ficar online")
+                && containsAny(allText, "oportunidades", "oportunidade", "bônus por região", "bonus por regiao");
+        if (opportunityMap && !hasAcceptanceAction) return rejected("screen_context:offline_opportunity_map");
+
+        boolean explicitOffer = hasAcceptanceAction || containsAny(allText,
+                "oferta r$", "oferta brl", "oferta da viagem", "oferta uber", "nova corrida", "nova oferta",
+                "chamada recebida", "valor da corrida", "valor da viagem");
         Double amount = findOfferAmount(joinedText, lines, nodes, starts, explicitOffer);
         Double rating = findRating(contextLines);
         String category = findCategory(contextLines);
@@ -132,13 +140,26 @@ public final class OfferParser {
 
         // Some offer cards expose two unlabeled time/distance pairs in visual order.
         // Use that order only when the same snapshot contains an explicit offer action.
-        if (explicitOffer && unassignedDistances.size() == 2) {
-            if (pickupDistance == null) pickupDistance = unassignedDistances.get(0);
-            if (tripDistance == null) tripDistance = unassignedDistances.get(1);
+        if (explicitOffer && unassignedDistances.size() == 2 && pickupDistance == null && tripDistance == null) {
+            pickupDistance = unassignedDistances.get(0);
+            tripDistance = unassignedDistances.get(1);
+        } else if (explicitOffer && unassignedDistances.size() == 1) {
+            if (pickupDistance == null && tripDistance != null) pickupDistance = unassignedDistances.get(0);
+            else if (tripDistance == null && pickupDistance != null) tripDistance = unassignedDistances.get(0);
         }
-        if (explicitOffer && unassignedDurations.size() == 2) {
-            if (!foundPickupDuration) { pickupDuration = unassignedDurations.get(0); foundPickupDuration = true; }
-            if (!foundTripDuration) { tripDuration = unassignedDurations.get(1); foundTripDuration = true; }
+        if (explicitOffer && unassignedDurations.size() == 2 && !foundPickupDuration && !foundTripDuration) {
+            pickupDuration = unassignedDurations.get(0);
+            foundPickupDuration = true;
+            tripDuration = unassignedDurations.get(1);
+            foundTripDuration = true;
+        } else if (explicitOffer && unassignedDurations.size() == 1) {
+            if (!foundPickupDuration && foundTripDuration) {
+                pickupDuration = unassignedDurations.get(0);
+                foundPickupDuration = true;
+            } else if (!foundTripDuration && foundPickupDuration) {
+                tripDuration = unassignedDurations.get(0);
+                foundTripDuration = true;
+            }
         }
         if (foundPickupDuration) pickupMinutes = pickupDuration;
         if (foundTripDuration) tripMinutes = tripDuration;
@@ -231,6 +252,94 @@ public final class OfferParser {
         String before = text.substring(Math.max(0, start - 20), start).toLowerCase(Locale.ROOT).trim();
         return before.endsWith("mais de") || before.endsWith("acima de") || before.endsWith(">")
                 || before.endsWith("over");
+    }
+
+    /** Narrows parsing to the smallest accessibility subtree that contains an offer action and its data. */
+    private static List<AccessibilityNode> isolateOfferCard(List<AccessibilityNode> source) {
+        int bestRoot = -1;
+        List<Integer> bestDescendants = null;
+        int bestScore = -1;
+        List<Integer> actions = new ArrayList<>();
+        for (int index = 0; index < source.size(); index++) {
+            AccessibilityNode node = source.get(index);
+            if (node != null && containsAny(node.accessibleText().toLowerCase(Locale.ROOT), "aceitar", "selecionar")) {
+                actions.add(index);
+            }
+        }
+        if (actions.isEmpty()) return source;
+
+        for (int action : actions) {
+            int ancestor = action;
+            int levels = 0;
+            while (ancestor >= 0 && ancestor < source.size() && levels++ < 32) {
+                List<Integer> descendants = descendantsOf(source, ancestor);
+                int score = offerSubtreeScore(source, descendants);
+                if (score > bestScore || (score == bestScore && bestDescendants != null
+                        && descendants.size() < bestDescendants.size())) {
+                    bestRoot = ancestor;
+                    bestDescendants = descendants;
+                    bestScore = score;
+                }
+                AccessibilityNode parent = source.get(ancestor);
+                ancestor = parent == null ? -1 : parent.parentOrder();
+            }
+        }
+        if (bestRoot < 0 || bestDescendants == null || bestDescendants.size() >= source.size()) return source;
+
+        int[] remap = new int[source.size()];
+        for (int index = 0; index < remap.length; index++) remap[index] = -1;
+        for (int index = 0; index < bestDescendants.size(); index++) remap[bestDescendants.get(index)] = index;
+        List<AccessibilityNode> scoped = new ArrayList<>(bestDescendants.size());
+        int baseDepth = source.get(bestRoot) == null ? 0 : source.get(bestRoot).depth();
+        for (int scopedOrder = 0; scopedOrder < bestDescendants.size(); scopedOrder++) {
+            int sourceOrder = bestDescendants.get(scopedOrder);
+            AccessibilityNode node = source.get(sourceOrder);
+            if (node == null) {
+                scoped.add(null);
+                continue;
+            }
+            int parent = node.parentOrder() >= 0 && node.parentOrder() < remap.length
+                    ? remap[node.parentOrder()] : -1;
+            scoped.add(new AccessibilityNode(node.text(), node.contentDescription(), node.resourceId(),
+                    node.className(), parent, Math.max(0, node.depth() - baseDepth), scopedOrder));
+        }
+        return scoped;
+    }
+
+    private static List<Integer> descendantsOf(List<AccessibilityNode> nodes, int root) {
+        List<Integer> descendants = new ArrayList<>();
+        for (int index = 0; index < nodes.size(); index++) {
+            int current = index;
+            int levels = 0;
+            while (current >= 0 && current < nodes.size() && levels++ < 32) {
+                if (current == root) {
+                    descendants.add(index);
+                    break;
+                }
+                AccessibilityNode node = nodes.get(current);
+                current = node == null ? -1 : node.parentOrder();
+            }
+        }
+        return descendants;
+    }
+
+    private static int offerSubtreeScore(List<AccessibilityNode> nodes, List<Integer> indices) {
+        StringBuilder text = new StringBuilder();
+        for (int index : indices) {
+            AccessibilityNode node = nodes.get(index);
+            if (node == null) continue;
+            if (!text.isEmpty()) text.append(' ');
+            text.append(node.accessibleText()).append(' ');
+            if (node.resourceId() != null) text.append(node.resourceId()).append(' ');
+        }
+        String value = text.toString().toLowerCase(Locale.ROOT);
+        boolean money = MONEY.matcher(value).find();
+        if (!money) return -1;
+        boolean route = DISTANCE.matcher(value).find() || DURATION.matcher(value).find();
+        boolean category = CATEGORY.matcher(value).find() || CATEGORY_LABEL.matcher(value).find();
+        boolean rating = RATING.matcher(value).find() || containsAny(value, "nota", "rating", "passageiro", "★");
+        if (!route && !category && !rating) return -1;
+        return 4 + (route ? 3 : 0) + (category ? 2 : 0) + (rating ? 1 : 0);
     }
 
     private static Double findRating(List<String> lines) {
