@@ -24,6 +24,8 @@ public final class OfferParser {
             "(?i)[0-9][0-9.,]*\\s*h(?:oras?)?\\s*([0-9][0-9.,]*)\\s*m\\b");
     private static final Pattern RATING = Pattern.compile(
             "(?i)\\b(?:nota|avalia[cç][aã]o|rating)\\b\\s*:?\\s*([0-5](?:[.,][0-9]{1,3})?)|★\\s*([0-5](?:[.,][0-9]{1,3})?)");
+    private static final Pattern ACCEPTANCE_ACTION = Pattern.compile(
+            "(?i)^(?:aceitar|selecionar)(?:\\s+(?:corrida|oferta|viagem|solicitação|solicitacao))?[.!]?$");
     private static final Pattern CATEGORY_LABEL = Pattern.compile("(?i)\\b(?:categoria|tipo)\\b\\s*:?\\s*([\\p{L}0-9 -]{2,35})");
     private static final Pattern CATEGORY = Pattern.compile(
             "(?i)\\b(Uber\\s*(?:X|Black|Comfort|Flash|Moto|Taxi|Bag|Pool)|Comfort|Black|Flash|Moto|Taxi|Priority)\\b");
@@ -70,6 +72,13 @@ public final class OfferParser {
         List<String> trace = detailedDiagnostics ? new ArrayList<>() : null;
         if (nodes == null || nodes.isEmpty()) return rejected("empty_tree", trace);
         int sourceNodeCount = nodes.size();
+        boolean offlineOpportunityMapInSource = isOfflineOpportunityMap(nodes);
+        boolean sourceHasAcceptanceAction = hasAcceptanceAction(nodes);
+        addTrace(trace, "offlineOpportunityMap source_tree=" + offlineOpportunityMapInSource
+                + "; acceptanceAction=" + sourceHasAcceptanceAction);
+        if (offlineOpportunityMapInSource && !sourceHasAcceptanceAction) {
+            return rejected("screen_context:offline_opportunity_map", trace);
+        }
         nodes = isolateOfferCard(nodes, trace);
         addTrace(trace, "isolateOfferCard source_nodes=" + sourceNodeCount + "; parsed_nodes=" + nodes.size());
         List<String> lines = new ArrayList<>(nodes.size());
@@ -98,7 +107,7 @@ public final class OfferParser {
         addTrace(trace, "EXCLUDED_SCREENS matched=" + (excludedScreen == null ? "none" : excludedScreen.replace(' ', '_')));
         if (excludedScreen != null) return rejected("screen_context:" + excludedScreen.replace(' ', '_'), trace);
 
-        boolean hasAcceptanceAction = containsAny(allText, "aceitar", "selecionar");
+        boolean hasAcceptanceAction = hasAcceptanceAction(nodes);
         addTrace(trace, "hasAcceptanceAction=" + hasAcceptanceAction);
         boolean opportunityMap = containsAny(allText, "ficar online")
                 && containsAny(allText, "oportunidades", "oportunidade", "bônus por região", "bonus por regiao");
@@ -374,8 +383,7 @@ public final class OfferParser {
         List<Integer> actions = new ArrayList<>();
         for (int index = 0; index < source.size(); index++) {
             AccessibilityNode node = source.get(index);
-            if (node != null && node.visibleToUser()
-                    && containsAny(node.accessibleText().toLowerCase(Locale.ROOT), "aceitar", "selecionar")) {
+            if (isAcceptanceAction(node)) {
                 actions.add(index);
             }
         }
@@ -625,6 +633,38 @@ public final class OfferParser {
     private static boolean containsAny(String text, String... terms) {
         for (String term : terms) if (text.contains(term)) return true;
         return false;
+    }
+
+    /** Checks the complete visible Uber tree before card isolation can drop screen-state cues. */
+    private static boolean isOfflineOpportunityMap(List<AccessibilityNode> nodes) {
+        boolean hasGoOnlineAction = false;
+        boolean hasOpportunityScreen = false;
+        for (AccessibilityNode node : nodes) {
+            if (node == null || !node.visibleToUser()) continue;
+            String visibleText = node.accessibleText().toLowerCase(Locale.ROOT);
+            String resourceId = node.resourceId() == null ? "" : node.resourceId().toLowerCase(Locale.ROOT);
+            hasGoOnlineAction |= containsAny(visibleText, "ficar online")
+                    || containsAny(resourceId, "go_online_button");
+            hasOpportunityScreen |= containsAny(visibleText,
+                    "oportunidades", "oportunidade", "bônus por região", "bonus por regiao");
+        }
+        return hasGoOnlineAction && hasOpportunityScreen;
+    }
+
+    private static boolean hasAcceptanceAction(List<AccessibilityNode> nodes) {
+        for (AccessibilityNode node : nodes) {
+            if (isAcceptanceAction(node)) return true;
+        }
+        return false;
+    }
+
+    private static boolean isAcceptanceAction(AccessibilityNode node) {
+        if (node == null || !node.visibleToUser()) return false;
+        String label = node.accessibleText().trim();
+        if (ACCEPTANCE_ACTION.matcher(label).matches()) return true;
+        String resourceId = node.resourceId() == null ? "" : node.resourceId().toLowerCase(Locale.ROOT);
+        return label.length() <= 32 && containsAny(resourceId, "accept_button", "request_accept", "offer_accept")
+                && containsAny(label.toLowerCase(Locale.ROOT), "aceitar", "selecionar");
     }
 
     private static void addTrace(List<String> trace, String value) {

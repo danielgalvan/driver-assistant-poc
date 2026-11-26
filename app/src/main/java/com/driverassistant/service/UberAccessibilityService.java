@@ -95,7 +95,10 @@ public final class UberAccessibilityService extends AccessibilityService {
         }
     }
 
-    public static boolean isConnected() { return connected; }
+    public static boolean isConnected() {
+        UberAccessibilityService service = activeService;
+        return connected && service != null && !service.paused && !service.shuttingDown;
+    }
 
     public static boolean isOverlayVisible() {
         UberAccessibilityService service = activeService;

@@ -95,6 +95,27 @@ public final class OfferParserTest {
         assertEquals("screen_context:offline_opportunity_map", parsed.rejectionReason());
     }
 
+    @Test public void rejectsOfflineMissionRangeWhenHelpTextMentionsAcceptingRequests() {
+        List<AccessibilityNode> offlineHome = List.of(
+                new AccessibilityNode("Home", null, "home/root", "FrameLayout", -1, 0, 0),
+                new AccessibilityNode("Oportunidades", null, "home/opportunities", "TextView", 0, 1, 1),
+                new AccessibilityNode("UberX", null, "map/category", "TextView", 0, 1, 2),
+                new AccessibilityNode("Missões disponíveis entre R$ 38 e R$ 46", null,
+                        "home/missions_summary", "TextView", 0, 1, 3),
+                new AccessibilityNode("1-3 min", null, "map/marker_eta", "TextView", 0, 1, 4),
+                new AccessibilityNode("1-2 min", null, "map/marker_eta", "TextView", 0, 1, 5),
+                new AccessibilityNode("Ficar online", null, "home/go_online_button", "Button", 0, 1, 6),
+                new AccessibilityNode("Veja melhores horários para aceitar solicitações hoje.", null,
+                        "home/help_copy", "TextView", 0, 1, 7));
+
+        OfferParseResult parsed = parser.parseNodes(offlineHome, true);
+
+        assertFalse(parsed.accepted());
+        assertEquals("screen_context:offline_opportunity_map", parsed.rejectionReason());
+        assertTrue(parsed.diagnosticTrace().stream()
+                .anyMatch(value -> value.contains("source_tree=true")));
+    }
+
     @Test public void doesNotPromoteAnUnlabeledMapAmountAndTravelCueToAnOffer() {
         OfferParseResult parsed = parser.parseNodes(List.of(
                 AccessibilityNode.textOnly("UberX", 0),

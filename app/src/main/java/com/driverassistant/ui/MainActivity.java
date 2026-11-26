@@ -31,6 +31,7 @@ import com.driverassistant.domain.IndicatorResult;
 import com.driverassistant.domain.RideMetrics;
 import com.driverassistant.domain.Signal;
 import com.driverassistant.domain.TripOffer;
+import com.driverassistant.lifecycle.MonitoringActivationPolicy;
 import com.driverassistant.util.DiagnosticLogStore;
 import com.driverassistant.util.DiagnosticCaptureStore;
 import com.google.android.material.card.MaterialCardView;
@@ -148,13 +149,20 @@ public final class MainActivity extends AppCompatActivity {
                 serviceConnected ? getString(R.string.yes) : getString(R.string.no)));
         permissionStatus.setText(getString(R.string.permission_status,
                 enabledInSettings ? getString(R.string.enabled) : getString(R.string.disabled)));
-        monitoringStatus.setText(getString(R.string.status_monitoring,
-                monitoring ? getString(R.string.enabled) : getString(R.string.disabled)));
-        monitoringStatus.setTextColor(getColor(monitoring ? R.color.signal_green : R.color.brand_primary_dark));
+        String monitoringLabel = monitoring
+                ? serviceConnected ? getString(R.string.enabled) : getString(R.string.monitoring_not_operational)
+                : getString(R.string.disabled);
+        monitoringStatus.setText(getString(R.string.status_monitoring, monitoringLabel));
+        monitoringStatus.setTextColor(getColor(monitoring
+                ? serviceConnected ? R.color.signal_green : R.color.signal_red
+                : R.color.brand_primary_dark));
         monitoringStatus.setTypeface(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD);
-        toggleMonitoringButton.setText(monitoring ? R.string.monitoring_stop_button : R.string.monitoring_start_button);
+        int monitoringButtonLabel = monitoring
+                ? serviceConnected ? R.string.monitoring_stop_button : R.string.monitoring_stop_button_disconnected
+                : R.string.monitoring_start_button;
+        toggleMonitoringButton.setText(monitoringButtonLabel);
         toggleMonitoringButton.setContentDescription(getString(monitoring
-                ? R.string.monitoring_stop_button : R.string.monitoring_start_button));
+                ? monitoringButtonLabel : R.string.monitoring_start_button));
         toggleMonitoringButton.setBackgroundTintList(ColorStateList.valueOf(getColor(
                 monitoring ? R.color.signal_red : R.color.action_green)));
         toggleMonitoringButton.setTextColor(getColor(android.R.color.white));
@@ -200,6 +208,7 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void startCapture() {
+        if (!ensureAccessibilityServiceReady()) return;
         if (captureStore.startCapture()) {
             Toast.makeText(this, R.string.capture_started, Toast.LENGTH_SHORT).show();
         } else {
@@ -301,12 +310,28 @@ public final class MainActivity extends AppCompatActivity {
 
     private void toggleMonitoring() {
         boolean enabled = !config.monitoringEnabled();
+        if (enabled && !ensureAccessibilityServiceReady()) return;
         config.setMonitoringEnabled(enabled);
         UberAccessibilityService.updateMonitoring(enabled);
-        if (enabled && !isAccessibilityServiceEnabled()) {
-            Toast.makeText(this, R.string.accessibility_disabled_message, Toast.LENGTH_LONG).show();
-        }
         refreshScreen();
+    }
+
+    private boolean ensureAccessibilityServiceReady() {
+        MonitoringActivationPolicy.BlockReason reason = MonitoringActivationPolicy.evaluate(
+                isAccessibilityServiceEnabled(), UberAccessibilityService.isConnected());
+        if (reason == MonitoringActivationPolicy.BlockReason.NONE) return true;
+
+        int message = reason == MonitoringActivationPolicy.BlockReason.SERVICE_NOT_ENABLED
+                ? R.string.accessibility_disabled_message
+                : R.string.accessibility_service_not_connected_message;
+        new MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.accessibility_required_title)
+                .setMessage(message)
+                .setPositiveButton(R.string.open_accessibility,
+                        (dialog, which) -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)))
+                .setNegativeButton(android.R.string.cancel, null)
+                .show();
+        return false;
     }
 
     private void runSimulation() {
