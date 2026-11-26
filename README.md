@@ -38,7 +38,7 @@ TripOffer → OfferLifecycleMachine → ProfitabilityCalculator → Classificati
 | `com.driverassistant.ui` | Tela de diagnóstico e configuração |
 | `com.driverassistant.util` | Logs locais redigidos, agrupados e exportáveis |
 
-As configurações e diagnósticos usam `SharedPreferences` nesta etapa. O contrato `OfferRepository` prepara a evolução para Room/SQLite, mas não há banco instalado nem histórico de corridas. O parser guarda snapshots em memória somente durante o processamento; endereços e nomes não são escritos nos diagnósticos.
+As configurações usam `SharedPreferences`; o diagnóstico detalhado usa um arquivo JSON Lines privado do app e uma fila de gravação em segundo plano. O contrato `OfferRepository` prepara a evolução para Room/SQLite, mas não há banco instalado nem histórico de corridas.
 
 ## Tecnologias
 
@@ -113,17 +113,27 @@ app/build/outputs/apk/debug/app-debug.apk
 8. Para conferir o cartão Android real, habilite o serviço e o monitoramento, abra **Testar cartão flutuante** e escolha um cenário. A simulação não incrementa contadores reais; o cartão mostra “SIMULAÇÃO”. Não há cenário disponível enquanto uma oferta real estiver ativa.
 9. Teste a mudança de app, a expiração configurada e o desligamento do monitoramento. Compare os valores do cartão com a tela do Uber Driver sem interagir com os botões de aceite ou recusa.
 
-O serviço está limitado ao package `com.ubercab.driver`. Ele precisa estar habilitado pelo usuário nas configurações do Android para continuar ativo em segundo plano.
+O serviço recebe metadados de eventos de acessibilidade para acompanhar mudanças de janela. Ele só percorre e analisa a árvore quando a raiz pertence ao package `com.ubercab.driver`; para outros apps, não lê texto, descrições ou componentes filhos. Essa coleta de metadados permite registrar uma janela externa, como a do Rota Pro, sem misturar o conteúdo da sobreposição à oferta Uber. O serviço não exige desativar outros serviços de acessibilidade. A coexistência real ainda precisa ser confirmada no aparelho com Uber Driver e Rota Pro instalados.
 
 ## Diagnóstico
 
-Os eventos aparecem na tela principal e são escritos no Logcat com estas tags:
+Os eventos resumidos aparecem na tela principal e são escritos no Logcat com estas tags:
 
 ```powershell
 adb logcat -s DA_ACCESSIBILITY DA_PARSER DA_OFFER DA_CALCULATOR DA_OVERLAY DA_CONFIG
 ```
 
-**Exportar logs de diagnóstico** abre o seletor de compartilhamento do Android. O buffer local retém até 200 eventos, agrupa gravações e limita eventos repetitivos. A exportação inclui contagens, campos disponíveis/ausentes, motivos de rejeição, transições e tempos de processamento; não inclui texto bruto da tela, nomes de passageiros ou endereços. **Diagnóstico detalhado** vem desligado por padrão; quando ligado, registra classes, IDs de recurso e comprimentos de texto, nunca os valores textuais.
+**Exportar logs de diagnóstico** continua oferecendo o resumo curto pelo seletor de compartilhamento. Para a investigação da regressão, use a nova captura detalhada temporária na tela inicial:
+
+1. Confirme na tela inicial que o serviço de acessibilidade está conectado. Antes do teste, toque em **Iniciar diagnóstico**. Isso independe do cartão flutuante e do botão de monitoramento.
+2. Deixe o Driver Assistant em segundo plano e use o Uber Driver normalmente. A captura permanece no aparelho, sem USB, ADB, Android Studio, Codex ou internet.
+3. Depois do teste, volte ao Driver Assistant e toque em **Encerrar diagnóstico**.
+4. Toque em **Exportar sessão ZIP (JSON)**. O arquivo fica em `Downloads/Driver Assistant/driver-assistant-diagnostic-AAAAmmdd-HHmmss.zip`; dentro dele, `diagnostics.json` contém eventos cronológicos e snapshots anonimizados. Cada registro tem `session_id` para distinguir sessões preservadas.
+5. **Limite de armazenamento** oferece 10, 25, 50 ou 100 MB; começa em 50 MB. Cada sessão encerra automaticamente após 8 horas ou quando atinge o limite. Registros são gravados progressivamente em armazenamento privado; sessões encerradas ficam disponíveis por até 7 dias ou até **Limpar dados de diagnóstico**.
+
+A captura detalhada fica desativada até o usuário iniciá-la. Snapshots guardam ordem, hierarquia, classe, ID, visibilidade e somente textos relevantes do Uber Driver depois de remover nomes/endereços/telefones reconhecíveis. O conteúdo das árvores de outros apps nunca é lido ou salvo; eventos externos são resumidos por pacote/tipo e metadados da janela. Os candidatos rejeitados são preservados como registros append-only, para que eventos do mapa não substituam o snapshot anterior. A máquina de ofertas continua usando as regras existentes nesta entrega; esta instrumentação não comprova que a captura real de ofertas foi corrigida.
+
+O modo **Diagnóstico detalhado da estrutura acessível** nas configurações continua separado e desligado por padrão. Ele grava o resumo estrutural já existente; a sessão temporária acima registra os dados necessários para a investigação e exporta JSON.
 
 A tela separa o serviço conectado, a permissão habilitada, o monitoramento, se a Uber já foi vista, se está em primeiro plano agora (quando a janela ativa permite determinar), se há oferta ativa e se o cartão está visível. “Último evento” é histórico e não é apresentado como estado atual.
 
@@ -137,7 +147,8 @@ O workflow `.github/workflows/android-ci.yml` é executado em pushes e pull requ
 
 - A árvore de acessibilidade do Uber Driver pode omitir campos ou mudar entre versões, aparelhos, regiões e tipos de oferta. Campos ausentes continuam indisponíveis; a POC não inventa valores.
 - Nenhum layout real da Uber é presumido. Os exemplos unitários são fixtures simuladas; a detecção e o cartão ainda precisam ser validados em aparelho físico com a versão do Uber Driver usada pelo motorista. Não se afirma que a integração real esteja funcionando antes dessa validação.
-- Os logs desta POC ajudam a diagnosticar eventos e parsing, mas não gravam o conteúdo integral capturado.
+- A sessão temporária preserva uma árvore anonimizada do Uber Driver. A anonimização depende dos padrões reconhecíveis de nome/endereço/telefone; revise o ZIP antes de compartilhar. O arquivo permanece local até o usuário exportá-lo.
+- Não foi validada fisicamente nesta entrega a coexistência com o Rota Pro nem a leitura de uma oferta real. O próximo teste deve iniciar o diagnóstico, usar ambos os apps com o Uber Driver em primeiro plano, encerrar e exportar a sessão; os eventos `ACTIVE_WINDOW_NOT_UBER`, `PARSER_RESULT`, `LIFECYCLE_RESULT` e `OVERLAY_*` mostrarão onde o fluxo parou.
 - A POC não usa backend, rede, autenticação, Room/SQLite, GPS, localização, notificações, acessibilidade para aceitar/recusar, root ou APIs privadas da Uber.
 - Não há detecção de corrida aceita, histórico, jornadas, veículos, combustível, manutenção, backup ou integração com a 99.
 

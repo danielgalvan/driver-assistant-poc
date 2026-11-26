@@ -281,4 +281,40 @@ public final class OfferParserTest {
         assertTrue(parser.parseNodes(List.of(AccessibilityNode.textOnly("Oferta UberX R$ 18,00", 0)))
                 .foundFields().contains("offered_amount"));
     }
+
+    @Test public void detailedDiagnosticsExposeValidationPathForARejectedSimulatedCandidate() {
+        OfferParseResult result = parser.parseNodes(List.of(
+                AccessibilityNode.textOnly("UberX", 0),
+                AccessibilityNode.textOnly("R$ 18,00", 1)), true);
+
+        assertFalse(result.accepted());
+        assertEquals("missing_accept_action_or_labeled_fare", result.rejectionReason());
+        assertTrue(result.diagnosticTrace().stream().anyMatch(value -> value.startsWith("isolateOfferCard")));
+        assertTrue(result.diagnosticTrace().stream().anyMatch(value -> value.startsWith("EXCLUDED_SCREENS")));
+        assertTrue(result.diagnosticTrace().stream().anyMatch(value -> value.startsWith("hasAcceptanceAction=")));
+        assertTrue(result.diagnosticTrace().stream().anyMatch(value -> value.startsWith("hasStructuredOfferCard=")));
+        assertTrue(result.diagnosticTrace().stream().anyMatch(value -> value.startsWith("money_candidate")));
+        assertTrue(result.diagnosticTrace().stream().anyMatch(value -> value.startsWith("findOfferAmount")));
+        assertTrue(result.diagnosticTrace().stream().anyMatch(value -> value.contains("hasSecondaryOfferData=")));
+        assertTrue(result.diagnosticTrace().stream().anyMatch(value -> value.contains("hasOfferContext=false")));
+        assertTrue(result.diagnosticTrace().stream().anyMatch(value -> value.equals(
+                "parser_result=rejected; reason=missing_accept_action_or_labeled_fare")));
+    }
+
+    @Test public void detailedDiagnosticsKeepSameAcceptedResultForSimulatedOffer() {
+        List<AccessibilityNode> simulatedTree = List.of(
+                AccessibilityNode.textOnly("Oferta UberX R$ 22,00", 0),
+                AccessibilityNode.textOnly("5 min (1 km) até o embarque", 1),
+                AccessibilityNode.textOnly("20 min (8 km) de viagem", 2),
+                AccessibilityNode.textOnly("Nota 4,95", 3),
+                AccessibilityNode.textOnly("Aceitar", 4));
+
+        OfferParseResult ordinary = parser.parseNodes(simulatedTree);
+        OfferParseResult detailed = parser.parseNodes(simulatedTree, true);
+
+        assertEquals(ordinary.accepted(), detailed.accepted());
+        assertEquals(ordinary.rejectionReason(), detailed.rejectionReason());
+        assertEquals(ordinary.offer().offeredAmount(), detailed.offer().offeredAmount());
+        assertTrue(detailed.diagnosticTrace().stream().anyMatch(value -> value.startsWith("parser_result=accepted")));
+    }
 }
