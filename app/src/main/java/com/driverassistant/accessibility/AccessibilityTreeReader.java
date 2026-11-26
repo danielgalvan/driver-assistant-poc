@@ -10,7 +10,9 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -47,6 +49,8 @@ public final class AccessibilityTreeReader {
     public static JSONArray diagnosticTree(List<AccessibilityNode> nodes) {
         JSONArray result = new JSONArray();
         if (nodes == null) return result;
+        Map<Integer, AccessibilityNode> byOrder = indexByOrder(nodes);
+        Map<Integer, List<AccessibilityNode>> siblings = siblingsByParent(nodes);
         for (AccessibilityNode node : nodes) {
             if (node == null) continue;
             JSONObject item = new JSONObject();
@@ -57,8 +61,10 @@ public final class AccessibilityTreeReader {
                 item.put("resource_id", node.resourceId() == null ? JSONObject.NULL : node.resourceId());
                 item.put("class", node.className() == null ? JSONObject.NULL : node.className());
                 item.put("visible", node.visibleToUser());
-                item.put("text", DiagnosticTextSanitizer.sanitizeRelevant(node.text()));
-                item.put("content_description", DiagnosticTextSanitizer.sanitizeRelevant(node.contentDescription()));
+                String context = localContext(node, byOrder, siblings);
+                item.put("text", DiagnosticTextSanitizer.sanitizeRelevantFragment(node.text(), context));
+                item.put("content_description", DiagnosticTextSanitizer.sanitizeRelevantFragment(
+                        node.contentDescription(), context));
                 result.put(item);
             } catch (JSONException ignored) { /* Keep the remaining ordered nodes. */ }
         }
@@ -68,13 +74,16 @@ public final class AccessibilityTreeReader {
     /** Stable digest for snapshot deduplication; it is not used in offer recognition. */
     public static String diagnosticFingerprint(List<AccessibilityNode> nodes) {
         StringBuilder value = new StringBuilder();
+        Map<Integer, AccessibilityNode> byOrder = indexByOrder(nodes);
+        Map<Integer, List<AccessibilityNode>> siblings = siblingsByParent(nodes);
         if (nodes != null) for (AccessibilityNode node : nodes) {
             if (node == null) continue;
+            String context = localContext(node, byOrder, siblings);
             value.append(node.order()).append('|').append(node.parentOrder()).append('|').append(node.depth())
                     .append('|').append(node.resourceId()).append('|').append(node.className())
                     .append('|').append(node.visibleToUser()).append('|')
-                    .append(DiagnosticTextSanitizer.sanitizeRelevant(node.text())).append('|')
-                    .append(DiagnosticTextSanitizer.sanitizeRelevant(node.contentDescription())).append('\n');
+                    .append(DiagnosticTextSanitizer.sanitizeRelevantFragment(node.text(), context)).append('|')
+                    .append(DiagnosticTextSanitizer.sanitizeRelevantFragment(node.contentDescription(), context)).append('\n');
         }
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256")
@@ -90,17 +99,79 @@ public final class AccessibilityTreeReader {
     public static boolean containsOfferCandidate(List<AccessibilityNode> nodes) {
         if (nodes == null) return false;
         StringBuilder text = new StringBuilder();
+        Map<Integer, AccessibilityNode> byOrder = indexByOrder(nodes);
+        Map<Integer, List<AccessibilityNode>> siblings = siblingsByParent(nodes);
         for (AccessibilityNode node : nodes) {
             if (node == null || !node.visibleToUser()) continue;
-            text.append(' ').append(DiagnosticTextSanitizer.sanitizeRelevant(node.accessibleText()));
+            String context = localContext(node, byOrder, siblings);
+            text.append(' ').append(DiagnosticTextSanitizer.sanitizeRelevantFragment(node.accessibleText(), context));
         }
         String normalized = text.toString().toLowerCase(Locale.ROOT);
         boolean money = normalized.contains("r$") || normalized.contains("brl");
         boolean offerCue = normalized.contains("aceitar") || normalized.contains("selecionar")
                 || normalized.contains("oferta") || normalized.contains("corrida")
-                || normalized.contains("uberx") || normalized.contains("comfort")
+                || normalized.contains("uberx") || normalized.contains("uber x") || normalized.contains("comfort")
                 || normalized.contains("priority") || normalized.contains("nova chamada");
         return money && offerCue;
+    }
+
+    /** Broad signal for preserving a changed tree during capture; it does not affect parser acceptance. */
+    public static boolean containsRelevantDiagnosticText(List<AccessibilityNode> nodes) {
+        if (nodes == null) return false;
+        Map<Integer, AccessibilityNode> byOrder = indexByOrder(nodes);
+        Map<Integer, List<AccessibilityNode>> siblings = siblingsByParent(nodes);
+        for (AccessibilityNode node : nodes) {
+            if (node == null || !node.visibleToUser()) continue;
+            String context = localContext(node, byOrder, siblings);
+            if (!DiagnosticTextSanitizer.sanitizeRelevantFragment(node.text(), context).isEmpty()
+                    || !DiagnosticTextSanitizer.sanitizeRelevantFragment(node.contentDescription(), context).isEmpty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static Map<Integer, AccessibilityNode> indexByOrder(List<AccessibilityNode> nodes) {
+        Map<Integer, AccessibilityNode> result = new HashMap<>();
+        if (nodes != null) for (AccessibilityNode node : nodes) if (node != null) result.put(node.order(), node);
+        return result;
+    }
+
+    private static Map<Integer, List<AccessibilityNode>> siblingsByParent(List<AccessibilityNode> nodes) {
+        Map<Integer, List<AccessibilityNode>> result = new HashMap<>();
+        if (nodes != null) for (AccessibilityNode node : nodes) {
+            if (node != null) result.computeIfAbsent(node.parentOrder(), ignored -> new ArrayList<>()).add(node);
+        }
+        return result;
+    }
+
+    private static String localContext(AccessibilityNode node, Map<Integer, AccessibilityNode> byOrder,
+                                       Map<Integer, List<AccessibilityNode>> siblings) {
+        StringBuilder context = new StringBuilder();
+        appendContext(context, node.accessibleText());
+        appendContext(context, node.resourceId());
+        appendContext(context, node.className());
+        AccessibilityNode parent = byOrder.get(node.parentOrder());
+        if (parent != null) {
+            appendContext(context, parent.accessibleText());
+            appendContext(context, parent.resourceId());
+            appendContext(context, parent.className());
+        }
+        List<AccessibilityNode> peers = siblings.get(node.parentOrder());
+        if (peers != null) {
+            int index = peers.indexOf(node);
+            for (int offset = Math.max(0, index - 2); offset <= Math.min(peers.size() - 1, index + 2); offset++) {
+                if (offset == index) continue;
+                AccessibilityNode peer = peers.get(offset);
+                appendContext(context, peer.accessibleText());
+                appendContext(context, peer.resourceId());
+            }
+        }
+        return context.toString();
+    }
+
+    private static void appendContext(StringBuilder target, String value) {
+        if (value != null && !value.isBlank()) target.append(' ').append(value);
     }
 
     private static void walk(AccessibilityNodeInfo node, int parentOrder, int depth,

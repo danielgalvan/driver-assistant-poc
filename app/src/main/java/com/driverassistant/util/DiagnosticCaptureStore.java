@@ -151,10 +151,21 @@ public final class DiagnosticCaptureStore {
 
     /** Dedupe identical trees, while keeping every distinct offer candidate as an append-only snapshot. */
     public boolean shouldCaptureTreeSnapshot(String fingerprint, boolean offerCandidate) {
+        return shouldCaptureTreeSnapshot(fingerprint, offerCandidate, false);
+    }
+
+    public boolean shouldCaptureTreeSnapshot(String fingerprint, boolean offerCandidate,
+                                             boolean relevantWindowChange) {
+        return shouldCaptureTreeSnapshot("default", fingerprint, offerCandidate, relevantWindowChange);
+    }
+
+    public boolean shouldCaptureTreeSnapshot(String scope, String fingerprint, boolean offerCandidate,
+                                             boolean relevantWindowChange) {
         synchronized (lock) {
             expireIfNeededLocked(System.currentTimeMillis());
             if (!active) return false;
-            return policy.shouldPersistSnapshot(fingerprint, offerCandidate, System.currentTimeMillis());
+            return policy.shouldPersistSnapshot(scope, fingerprint, offerCandidate, relevantWindowChange,
+                    System.currentTimeMillis());
         }
     }
 

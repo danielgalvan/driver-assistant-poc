@@ -15,6 +15,10 @@
     <string name="capture_disclosure">Ative manualmente antes de testar. Registros anonimizados são gravados no aparelho, mesmo com o Driver Assistant em segundo plano. Limite atual: %1$d MB; sessão máxima: 8 horas. Nada é enviado pela rede. Encerre e exporte o ZIP após o teste.</string>
     <string name="capture_status_active">Captura ATIVA · %1$s · %2$.2f / %3$.0f MB · %4$s</string>
     <string name="capture_status_inactive">Captura inativa · %1$s · %2$.2f / %3$.0f MB · %4$s</string>
+    <string name="capture_modes_status">Diagnóstico: %1$s  •  Monitoramento: %2$s  •  Cartão configurado: %3$s</string>
+    <string name="capture_monitoring_off_warning">Monitoramento desligado: o diagnóstico registra a árvore e o parser, mas a máquina de estados e o cartão não serão executados.</string>
+    <string name="capture_monitoring_off_dialog">O diagnóstico ficará ativo, mas com o monitoramento desligado a máquina de estados e o cartão flutuante não serão executados. Para testar o fluxo completo, ative o monitoramento. Deseja iniciar somente a captura mesmo assim?</string>
+    <string name="capture_start_anyway">Iniciar captura</string>
     <string name="capture_running">em execução</string>
     <string name="capture_start">Iniciar diagnóstico</string>
     <string name="capture_stop">Encerrar diagnóstico</string>

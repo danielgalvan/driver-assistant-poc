@@ -20,6 +20,7 @@ import com.driverassistant.domain.TripOffer;
 import com.driverassistant.lifecycle.OfferLifecycleEvent;
 import com.driverassistant.lifecycle.OfferLifecycleMachine;
 import com.driverassistant.lifecycle.OfferLifecycleState;
+import com.driverassistant.diagnostics.BoundedEventQueue;
 import com.driverassistant.overlay.OverlayController;
 import com.driverassistant.parser.AccessibilityNode;
 import com.driverassistant.parser.OfferParseResult;
@@ -35,19 +36,19 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 
 /** Reads accessible content only from Uber Driver; foreign events are reduced to metadata. */
 public final class UberAccessibilityService extends AccessibilityService {
     public static final String UBER_PACKAGE = "com.ubercab.driver";
     private static final long FOREGROUND_POLL_MILLIS = 500;
+    private static final int MAX_PENDING_SNAPSHOTS = 16;
     private static volatile boolean connected;
     private static volatile UberAccessibilityService activeService;
     private static long nextSimulationSession = -1;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final AtomicBoolean snapshotDrainScheduled = new AtomicBoolean();
-    private final AtomicReference<EventRequest> pendingSnapshot = new AtomicReference<>();
+    private final BoundedEventQueue<EventRequest> pendingSnapshots = new BoundedEventQueue<>(MAX_PENDING_SNAPSHOTS);
     private volatile long lastSnapshotRequestAt;
     private final Runnable foregroundWatch = new Runnable() {
         @Override public void run() {
@@ -74,6 +75,8 @@ public final class UberAccessibilityService extends AccessibilityService {
     private long simulationSessionId;
     private final ConcurrentHashMap<String, Integer> externalEventCounts = new ConcurrentHashMap<>();
     private volatile long lastExternalSummaryAt;
+    private long lastQueueOverflowDiagnosticAt;
+    private int suppressedQueueOverflowDiagnostics;
     private volatile long lastWindowStateAt;
     private volatile String lastExternalWindowFingerprint = "";
     private String lastCaptureSessionId;
@@ -84,14 +87,41 @@ public final class UberAccessibilityService extends AccessibilityService {
     private static final class EventRequest {
         final int eventType;
         final long startedAt;
+        final long eventTimeUptimeMillis;
         final boolean foregroundPoll;
         final String sourcePackage;
+        final int windowId;
+        final int contentChangeTypes;
 
-        EventRequest(int eventType, long startedAt, boolean foregroundPoll, String sourcePackage) {
+        EventRequest(int eventType, long startedAt, long eventTimeUptimeMillis, boolean foregroundPoll,
+                     String sourcePackage, int windowId, int contentChangeTypes) {
             this.eventType = eventType;
             this.startedAt = startedAt;
+            this.eventTimeUptimeMillis = eventTimeUptimeMillis;
             this.foregroundPoll = foregroundPoll;
             this.sourcePackage = sourcePackage;
+            this.windowId = windowId;
+            this.contentChangeTypes = contentChangeTypes;
+        }
+
+        int priority() {
+            if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+                    || eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED) return 3;
+            if (eventType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED
+                    || eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
+                    && contentChangeTypes != 0) return 2;
+            if (UBER_PACKAGE.equals(sourcePackage)) return 1;
+            return 0;
+        }
+
+        boolean isWindowTransition() {
+            return eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+                    || eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED;
+        }
+
+        boolean isTextOrContentChange() {
+            return eventType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED
+                    || eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED && contentChangeTypes != 0;
         }
     }
 
@@ -118,6 +148,11 @@ public final class UberAccessibilityService extends AccessibilityService {
     public static void updateMonitoring(boolean enabled) {
         UberAccessibilityService service = activeService;
         if (service == null) return;
+        if (service.captureStore != null && service.captureStore.isActive()) {
+            service.captureStore.record("MODE_STATE", DiagnosticCaptureStore.object(
+                    "reason", "monitoring_changed", "monitoring_enabled", enabled,
+                    "overlay_configured", service.config != null && service.config.overlayEnabled()));
+        }
         if (!enabled) {
             service.disableLifecycle("monitoring_disabled");
             if (service.overlay != null) service.overlay.hide("monitoring_disabled");
@@ -127,6 +162,12 @@ public final class UberAccessibilityService extends AccessibilityService {
     public static void refreshOverlayConfiguration() {
         UberAccessibilityService service = activeService;
         if (service == null || service.overlay == null || service.config == null) return;
+        if (service.captureStore != null && service.captureStore.isActive()) {
+            service.captureStore.record("MODE_STATE", DiagnosticCaptureStore.object(
+                    "reason", "overlay_configuration_changed",
+                    "monitoring_enabled", service.config.monitoringEnabled(),
+                    "overlay_configured", service.config.overlayEnabled()));
+        }
         service.overlay.hide("overlay_configuration_changed");
         if (service.config.overlayEnabled()) service.restoreRealOffer();
     }
@@ -166,6 +207,9 @@ public final class UberAccessibilityService extends AccessibilityService {
         ensureInitialized();
         long startedAt = SystemClock.elapsedRealtime();
         int eventType = event.getEventType();
+        int windowId = event.getWindowId();
+        int contentChangeTypes = event.getContentChangeTypes();
+        long eventTimeUptimeMillis = event.getEventTime();
         String eventPackage = event.getPackageName() == null ? "unknown" : event.getPackageName().toString();
         boolean uberEvent = UBER_PACKAGE.equals(eventPackage);
         if (captureStore.isActive()) {
@@ -173,23 +217,25 @@ public final class UberAccessibilityService extends AccessibilityService {
                 captureStore.record("ACCESSIBILITY_EVENT", DiagnosticCaptureStore.object(
                         "event_type", eventType, "event_type_name", AccessibilityEvent.eventTypeToString(eventType),
                         "package", UBER_PACKAGE, "class", safeClass(event.getClassName()),
-                        "window_id", event.getWindowId(), "content_change_types", event.getContentChangeTypes(),
-                        "event_time_uptime_ms", event.getEventTime()));
+                        "window_id", windowId, "content_change_types", contentChangeTypes,
+                        "event_time_uptime_ms", eventTimeUptimeMillis));
             } else {
-                recordExternalEvent(eventPackage, eventType, event.getWindowId());
+                recordExternalEvent(eventPackage, eventType, windowId);
             }
         }
         if (!uberEvent) {
-            if (captureStore.isActive() && config != null && config.monitoringEnabled()) {
+            if (captureStore.isActive() || config != null && config.monitoringEnabled()) {
                 long now = SystemClock.elapsedRealtime();
                 if (now - lastSnapshotRequestAt >= 500) {
-                    requestSnapshot(eventType, startedAt, false, eventPackage);
+                    requestSnapshot(eventType, startedAt, eventTimeUptimeMillis, false,
+                            eventPackage, windowId, contentChangeTypes);
                 }
             }
             return;
         }
         if (!config.monitoringEnabled()) {
-            if (captureStore.isActive()) requestSnapshot(eventType, startedAt, false, eventPackage);
+            if (captureStore.isActive()) requestSnapshot(eventType, startedAt, eventTimeUptimeMillis,
+                    false, eventPackage, windowId, contentChangeTypes);
             else analysisHandler.post(() -> {
                     DiagnosticLogStore.markUberEvent(this, Integer.toString(eventType));
                     DiagnosticLogStore.record(this, "DA_ACCESSIBILITY", "UBER_EVENT", "type=" + eventType);
@@ -201,16 +247,37 @@ public final class UberAccessibilityService extends AccessibilityService {
 
         // Accessibility callbacks arrive on the service's main thread. Keep this path short:
         // reading the window tree can involve hundreds of Binder calls on some driver screens.
-        requestSnapshot(eventType, startedAt, false, eventPackage);
+        requestSnapshot(eventType, startedAt, eventTimeUptimeMillis, false,
+                eventPackage, windowId, contentChangeTypes);
     }
 
-    private void requestSnapshot(int eventType, long startedAt, boolean foregroundPoll, String sourcePackage) {
+    private void requestSnapshot(int eventType, long startedAt, long eventTimeUptimeMillis,
+                                 boolean foregroundPoll, String sourcePackage, int windowId,
+                                 int contentChangeTypes) {
         lastSnapshotRequestAt = startedAt;
-        EventRequest previous = pendingSnapshot.getAndSet(new EventRequest(eventType, startedAt, foregroundPoll, sourcePackage));
-        if (previous != null && captureStore != null && captureStore.isActive()) {
-            captureStore.recordSnapshotSkipped(previous.startedAt, "coalesced_by_newer_event");
+        EventRequest request = new EventRequest(eventType, startedAt, eventTimeUptimeMillis,
+                foregroundPoll, sourcePackage, windowId, contentChangeTypes);
+        BoundedEventQueue.OfferResult<EventRequest> enqueue = pendingSnapshots.offer(request, request.priority());
+        EventRequest dropped = enqueue.dropped();
+        if (dropped != null && captureStore != null && captureStore.isActive()) {
+            captureStore.recordSnapshotSkipped(dropped.startedAt, enqueue.incomingDropped()
+                    ? "event_queue_overflow_new_event_dropped" : "event_queue_overflow_oldest_low_priority_dropped");
+            long now = SystemClock.elapsedRealtime();
+            if (lastQueueOverflowDiagnosticAt == 0 || now - lastQueueOverflowDiagnosticAt >= 5_000) {
+                captureStore.record("EVENT_QUEUE_OVERFLOW", DiagnosticCaptureStore.object(
+                        "incoming_event_type", eventType, "incoming_package", sourcePackage,
+                        "incoming_window_id", windowId, "dropped_event_type", dropped.eventType,
+                        "dropped_package", dropped.sourcePackage, "dropped_window_id", dropped.windowId,
+                        "incoming_dropped", enqueue.incomingDropped(),
+                        "suppressed_overflows", suppressedQueueOverflowDiagnostics,
+                        "queue_size", pendingSnapshots.size(), "capacity", MAX_PENDING_SNAPSHOTS));
+                lastQueueOverflowDiagnosticAt = now;
+                suppressedQueueOverflowDiagnostics = 0;
+            } else {
+                suppressedQueueOverflowDiagnostics++;
+            }
         }
-        scheduleSnapshotDrain();
+        if (enqueue.accepted()) scheduleSnapshotDrain();
     }
 
     private void scheduleSnapshotDrain() {
@@ -218,16 +285,16 @@ public final class UberAccessibilityService extends AccessibilityService {
         if (handler == null || !snapshotDrainScheduled.compareAndSet(false, true)) return;
         handler.post(() -> {
             try {
-                EventRequest request = pendingSnapshot.getAndSet(null);
+                EventRequest request = pendingSnapshots.pollFirst();
                 if (request != null) captureSnapshot(request);
             } finally {
                 snapshotDrainScheduled.set(false);
-                if (pendingSnapshot.get() != null) scheduleSnapshotDrain();
+                if (!pendingSnapshots.isEmpty()) scheduleSnapshotDrain();
             }
         });
     }
 
-    /** Runs on the dedicated analysis thread; intermediate events are coalesced to the latest. */
+    /** Runs queued events on the dedicated analysis thread, retaining window transitions under pressure. */
     private void captureSnapshot(EventRequest request) {
         if (paused || shuttingDown || !connected) return;
         int eventType = request.eventType;
@@ -245,57 +312,117 @@ public final class UberAccessibilityService extends AccessibilityService {
             hideOverlay("monitoring_disabled");
             return;
         }
-        AccessibilityNodeInfo root = null;
-        WindowSnapshot windows = null;
+        AccessibilityNodeInfo activeRoot = null;
+        WindowSnapshot windowSnapshot = null;
+        List<WindowRoot> roots = new java.util.ArrayList<>();
         try {
-            root = getRootInActiveWindow();
-            boolean activeRootUnavailable = root == null;
-            String activePackage = root == null || root.getPackageName() == null
-                    ? "unknown" : root.getPackageName().toString();
-            if (captureActive || root == null || !UBER_PACKAGE.equals(activePackage)) {
-                windows = findUberWindowRoot();
-            }
-            JSONArray windowMetadata = windows == null ? new JSONArray() : windows.metadata;
+            activeRoot = getRootInActiveWindow();
+            boolean activeRootUnavailable = activeRoot == null;
+            String activePackage = packageName(activeRoot);
             boolean uberActive = UBER_PACKAGE.equals(activePackage);
+            // An offer may be exposed in a separate Uber-owned window while the map remains active.
+            // Always inspect Uber-owned windows; roots from other packages are metadata only.
+            boolean inspectAllWindows = true;
+            if (inspectAllWindows) windowSnapshot = findUberWindowRoots();
+            JSONArray windowMetadata = windowSnapshot == null ? new JSONArray() : windowSnapshot.metadata;
             if (captureActive && shouldRecordWindowState((uberActive ? "uber:" : "foreign:") + activePackage, windowMetadata)) {
                 captureStore.record(uberActive ? "ACTIVE_WINDOW" : "ACTIVE_WINDOW_NOT_UBER", DiagnosticCaptureStore.object(
                         "active_package", activePackage, "event_package", request.sourcePackage,
                         "event_type", eventType, "source", source,
-                        "uber_window_found", windows != null && windows.root != null,
+                        "uber_window_count", windowSnapshot == null ? 0 : windowSnapshot.roots.size(),
                         "windows", windowMetadata));
             }
-            if (root == null || !UBER_PACKAGE.equals(activePackage)) {
-                if (root != null) root.recycle();
-                root = null;
-                if (windows == null) windows = new WindowSnapshot(null, new JSONArray());
-                root = windows.root;
-                windows.root = null;
-                if (root == null) {
-                    if (captureActive) captureStore.recordSnapshotSkipped(startedAt,
-                            "active_window_not_uber_and_no_accessible_uber_window");
-                    // A third-party accessibility overlay can become the active window while the Uber offer remains.
-                    // Do not turn that foreign root into an offer disappearance.
-                    if (activeRootUnavailable && monitoringEnabled
-                            && UBER_PACKAGE.equals(request.sourcePackage)) {
-                        processMissing("tree_unavailable", startedAt);
+            if (inspectAllWindows && windowSnapshot != null && !windowSnapshot.roots.isEmpty()) {
+                roots.addAll(windowSnapshot.roots);
+                windowSnapshot.roots.clear(); // Ownership transfers to this request.
+                if (activeRoot != null) {
+                    int activeWindowId = activeRoot.getWindowId();
+                    boolean activeWindowIncluded = roots.stream().anyMatch(window -> window.id == activeWindowId);
+                    if (uberActive && !activeWindowIncluded) {
+                        windowMetadata.put(DiagnosticCaptureStore.object("id", activeWindowId, "type", -1,
+                                "layer", -1, "active", true, "focused", true,
+                                "root_package", activePackage, "source", "active_root_not_listed_by_getWindows"));
+                        roots.add(new WindowRoot(activeWindowId, -1, -1, true, true, activeRoot));
+                        activeRoot = null;
+                    } else {
+                        activeRoot.recycle();
+                        activeRoot = null;
                     }
-                    return;
+                }
+            } else if (uberActive && activeRoot != null) {
+                roots.add(new WindowRoot(activeRoot.getWindowId(), -1, -1, true, true, activeRoot));
+                activeRoot = null;
+            }
+
+            if (roots.isEmpty()) {
+                if (captureActive) captureStore.recordSnapshotSkipped(startedAt,
+                        "active_window_not_uber_and_no_accessible_uber_window");
+                // A third-party accessibility overlay can become active while the Uber offer remains.
+                // Foreign roots are never traversed, and their appearance is not offer disappearance.
+                if (activeRootUnavailable && monitoringEnabled && UBER_PACKAGE.equals(request.sourcePackage)) {
+                    processMissing("tree_unavailable", startedAt);
+                }
+                return;
+            }
+
+            OfferParseResult selectedOffer = null;
+            int selectedOfferScore = Integer.MIN_VALUE;
+            String rejectionReason = "empty_uber_tree";
+            int parsedWindowCount = 0;
+            boolean anyParserAccepted = false;
+            for (WindowRoot window : roots) {
+                AccessibilityNodeInfo root = window.root;
+                window.root = null;
+                try {
+                    long treeReadStartedAt = SystemClock.elapsedRealtime();
+                    List<AccessibilityNode> snapshot = treeReader.read(root);
+                    long treeReadMillis = SystemClock.elapsedRealtime() - treeReadStartedAt;
+                    long queueMillis = Math.max(0, workerStartedAt - startedAt);
+                    DiagnosticLogStore.record(this, "DA_ACCESSIBILITY", "SNAPSHOT_TIMING",
+                            "source=" + source + "; queue_ms=" + queueMillis
+                                    + "; event_age_ms=" + Math.max(0, SystemClock.uptimeMillis() - request.eventTimeUptimeMillis)
+                                    + "; tree_ms=" + treeReadMillis
+                                    + "; nodes=" + snapshot.size() + "; window_id=" + window.id);
+                    if (snapshot.isEmpty()) {
+                        if (captureActive) captureStore.recordSnapshotSkipped(startedAt,
+                                "empty_uber_tree_window_" + window.id);
+                        continue;
+                    }
+
+                    parsedWindowCount++;
+                    OfferParseResult result = processSnapshot(List.copyOf(snapshot), startedAt, request,
+                            activePackage, windowMetadata, window, monitoringEnabled, queueMillis, treeReadMillis);
+                    if (result == null) continue;
+                    if (result.accepted()) {
+                        anyParserAccepted = true;
+                        int score = result.foundFields().size() * 10 + (window.focused ? 2 : window.active ? 1 : 0);
+                        if (score > selectedOfferScore) {
+                            selectedOffer = result;
+                            selectedOfferScore = score;
+                        }
+                    } else if (rejectionReason.equals("empty_uber_tree")) {
+                        rejectionReason = result.rejectionReason();
+                    }
+                } catch (RuntimeException exception) {
+                    DiagnosticLogStore.record(this, "DA_ACCESSIBILITY", "PROCESSING_ERROR",
+                            "exception=" + exception.getClass().getSimpleName() + "; window_id=" + window.id);
+                    if (captureActive) captureStore.record("PROCESSING_EXCEPTION", DiagnosticCaptureStore.object(
+                            "exception", exception.getClass().getSimpleName(), "source", source,
+                            "window_id", window.id));
                 }
             }
 
-            long treeReadStartedAt = SystemClock.elapsedRealtime();
-            List<AccessibilityNode> snapshot = treeReader.read(root);
-            long treeReadMillis = SystemClock.elapsedRealtime() - treeReadStartedAt;
-            root = null; // The reader recycles every visited node, including the root.
-            DiagnosticLogStore.record(this, "DA_ACCESSIBILITY", "SNAPSHOT_TIMING",
-                    "source=" + source + "; queue_ms=" + Math.max(0, workerStartedAt - startedAt)
-                            + "; tree_ms=" + treeReadMillis + "; nodes=" + snapshot.size());
-            if (snapshot.isEmpty()) {
-                if (captureActive) captureStore.recordSnapshotSkipped(startedAt, "empty_uber_tree");
-                if (monitoringEnabled) processMissing("empty_tree", startedAt);
+            if (!monitoringEnabled) {
+                if (captureActive) captureStore.record("LIFECYCLE_NOT_RUN", DiagnosticCaptureStore.object(
+                        "reason", "monitoring_disabled", "parser_accepted", anyParserAccepted,
+                        "uber_windows_examined", roots.size(), "trees_parsed", parsedWindowCount));
                 return;
             }
-            processSnapshot(List.copyOf(snapshot), eventType, startedAt, request, activePackage, windowMetadata);
+            if (selectedOffer != null) applyOfferResult(selectedOffer, startedAt);
+            else if (parsedWindowCount > 0) processMissing(rejectionReason, startedAt);
+            else if (activeRootUnavailable && UBER_PACKAGE.equals(request.sourcePackage)) {
+                processMissing("all_uber_windows_unavailable", startedAt);
+            }
         } catch (RuntimeException exception) {
             DiagnosticLogStore.record(this, "DA_ACCESSIBILITY", "PROCESSING_ERROR",
                     "exception=" + exception.getClass().getSimpleName());
@@ -303,8 +430,9 @@ public final class UberAccessibilityService extends AccessibilityService {
                     "exception", exception.getClass().getSimpleName(), "source", source));
             if (monitoringEnabled) processMissing("tree_read_error", startedAt);
         } finally {
-            if (root != null) root.recycle();
-            if (windows != null) windows.recycle();
+            if (activeRoot != null) activeRoot.recycle();
+            for (WindowRoot window : roots) window.recycle();
+            if (windowSnapshot != null) windowSnapshot.recycle();
         }
     }
 
@@ -343,15 +471,15 @@ public final class UberAccessibilityService extends AccessibilityService {
         }
     }
 
-    private void processSnapshot(List<AccessibilityNode> snapshot, int eventType, long startedAt,
-                                 EventRequest request, String activePackage, JSONArray windowMetadata) {
-        if (paused || shuttingDown || !connected) return;
-        boolean monitoringEnabled = config.monitoringEnabled();
+    private OfferParseResult processSnapshot(List<AccessibilityNode> snapshot, long startedAt,
+                                             EventRequest request, String activePackage,
+                                             JSONArray windowMetadata, WindowRoot window,
+                                             boolean monitoringEnabled, long queueMillis,
+                                             long treeReadMillis) {
+        if (paused || shuttingDown || !connected) return null;
         boolean captureActive = captureStore != null && captureStore.isActive();
         if (!monitoringEnabled && !captureActive) {
-            disableLifecycleOnAnalysis("monitoring_disabled");
-            DiagnosticLogStore.recordProcessingTime(this, SystemClock.elapsedRealtime() - startedAt);
-            return;
+            return null;
         }
         if (config.detailedDiagnosticsEnabled()) {
             DiagnosticLogStore.recordStructure(this, AccessibilityTreeReader.structureSummary(snapshot));
@@ -361,67 +489,68 @@ public final class UberAccessibilityService extends AccessibilityService {
             OfferParseResult result = parser.parseNodes(snapshot, captureActive);
             DiagnosticLogStore.recordParserResult(this, result);
             if (captureActive) recordParserDiagnostics(snapshot, result, request, activePackage, windowMetadata,
-                    SystemClock.elapsedRealtime() - startedAt, monitoringEnabled);
-            if (!monitoringEnabled) {
-                captureStore.record("LIFECYCLE_NOT_RUN", DiagnosticCaptureStore.object(
-                        "reason", "monitoring_disabled", "parser_accepted", result.accepted()));
-                return;
-            }
-            if (!result.accepted()) {
-                processMissing(result.rejectionReason(), startedAt);
-                return;
-            }
-
-            OfferLifecycleEvent transition = lifecycle.observe(Optional.of(result.offer()), SystemClock.uptimeMillis());
-            recordLifecycle(transition, result.offer());
-            if (!transition.transitioned()) {
-                DiagnosticLogStore.recordProcessingTime(this, SystemClock.elapsedRealtime() - startedAt);
-                return;
-            }
-            logTransition(transition);
-            if (transition.state() == OfferLifecycleState.OFFER_DISAPPEARED) {
-                activeOfferSnapshot = null;
-                hideOverlay("offer_disappeared");
-                mainHandler.removeCallbacks(foregroundWatch);
-                DiagnosticLogStore.recordProcessingTime(this, SystemClock.elapsedRealtime() - startedAt);
-                return;
-            }
-
-            TripOffer offer = transition.offer();
-            RideMetrics metrics = calculator.calculate(offer);
-            ClassificationResult classification = classificationService.classify(
-                    metrics, offer.passengerRating(), config.loadThresholds());
-            activeOfferSnapshot = offer;
-            if (transition.state() == OfferLifecycleState.OFFER_DETECTED) {
-                DiagnosticLogStore.recordOffer(this, offer, metrics, classification.incomplete());
-                startForegroundWatch();
-            } else {
-                DiagnosticLogStore.updateLastOffer(this, offer, metrics);
-            }
-            DiagnosticLogStore.record(this, "DA_CALCULATOR", "CLASSIFIED",
-                    "overall=" + classification.overallSignal() + "; incomplete=" + classification.incomplete());
-            if (overlay == null) overlay = new OverlayController(this);
-            simulationEpoch++;
-            overlay.show(offer, metrics, classification, transition.sessionId(), false);
+                    SystemClock.elapsedRealtime() - startedAt, monitoringEnabled, window,
+                    queueMillis, treeReadMillis);
+            return result;
         } catch (RuntimeException exception) {
             DiagnosticLogStore.record(this, "DA_ACCESSIBILITY", "PROCESSING_ERROR",
                     "exception=" + exception.getClass().getSimpleName());
             if (captureStore != null) captureStore.record("PROCESSING_EXCEPTION", DiagnosticCaptureStore.object(
-                    "exception", exception.getClass().getSimpleName(), "stage", "parser_or_lifecycle"));
+                    "exception", exception.getClass().getSimpleName(), "stage", "parser", "window_id", window.id));
             if (captureStore != null && captureStore.isActive()) {
-                String fingerprint = AccessibilityTreeReader.diagnosticFingerprint(snapshot);
-                if (captureStore.shouldCaptureTreeSnapshot(fingerprint, true)) {
+                String fingerprint = window.id + "|" + AccessibilityTreeReader.diagnosticFingerprint(snapshot);
+                if (captureStore.shouldCaptureTreeSnapshot(Integer.toString(window.id), fingerprint,
+                        true, request.isWindowTransition())) {
                     captureStore.record("UBER_TREE_SNAPSHOT", DiagnosticCaptureStore.object(
-                            "event_type", eventType, "event_package", request.sourcePackage,
-                            "active_package", activePackage, "node_count", snapshot.size(),
+                            "event_type", request.eventType, "event_package", request.sourcePackage,
+                            "active_package", activePackage, "window_id", window.id,
+                            "window_type", window.type, "window_layer", window.layer,
+                            "window_active", window.active, "window_focused", window.focused,
+                            "node_count", snapshot.size(),
                             "parser_exception", exception.getClass().getSimpleName(),
                             "tree", AccessibilityTreeReader.diagnosticTree(snapshot), "windows", windowMetadata));
                 }
             }
-            if (monitoringEnabled) processMissing("processing_error", startedAt);
+            return null;
+        }
+    }
+
+    private void applyOfferResult(OfferParseResult result, long startedAt) {
+        if (result == null || !result.accepted()) {
+            processMissing(result == null ? "parser_unavailable" : result.rejectionReason(), startedAt);
             return;
         }
-        DiagnosticLogStore.recordProcessingTime(this, SystemClock.elapsedRealtime() - startedAt);
+        OfferLifecycleEvent transition = lifecycle.observe(Optional.of(result.offer()), SystemClock.uptimeMillis());
+        recordLifecycle(transition, result.offer());
+        if (!transition.transitioned()) {
+            DiagnosticLogStore.recordProcessingTime(this, SystemClock.elapsedRealtime() - startedAt);
+            return;
+        }
+        logTransition(transition);
+        if (transition.state() == OfferLifecycleState.OFFER_DISAPPEARED) {
+            activeOfferSnapshot = null;
+            hideOverlay("offer_disappeared");
+            mainHandler.removeCallbacks(foregroundWatch);
+            DiagnosticLogStore.recordProcessingTime(this, SystemClock.elapsedRealtime() - startedAt);
+            return;
+        }
+
+        TripOffer offer = transition.offer();
+        RideMetrics metrics = calculator.calculate(offer);
+        ClassificationResult classification = classificationService.classify(
+                metrics, offer.passengerRating(), config.loadThresholds());
+        activeOfferSnapshot = offer;
+        if (transition.state() == OfferLifecycleState.OFFER_DETECTED) {
+            DiagnosticLogStore.recordOffer(this, offer, metrics, classification.incomplete());
+            startForegroundWatch();
+        } else {
+            DiagnosticLogStore.updateLastOffer(this, offer, metrics);
+        }
+        DiagnosticLogStore.record(this, "DA_CALCULATOR", "CLASSIFIED",
+                "overall=" + classification.overallSignal() + "; incomplete=" + classification.incomplete());
+        if (overlay == null) overlay = new OverlayController(this);
+        simulationEpoch++;
+        overlay.show(offer, metrics, classification, transition.sessionId(), false);
     }
 
     private void processMissing(String reason, long startedAt) {
@@ -446,7 +575,8 @@ public final class UberAccessibilityService extends AccessibilityService {
         if (uberForeground) {
             long now = SystemClock.elapsedRealtime();
             if (now - lastSnapshotRequestAt >= FOREGROUND_POLL_MILLIS) {
-                requestSnapshot(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED, now, true, UBER_PACKAGE);
+                requestSnapshot(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED, now, SystemClock.uptimeMillis(),
+                        true, UBER_PACKAGE, -1, AccessibilityEvent.CONTENT_CHANGE_TYPE_SUBTREE);
             }
         } else {
             if (captureStore != null && captureStore.isActive()) {
@@ -482,8 +612,8 @@ public final class UberAccessibilityService extends AccessibilityService {
         } finally {
             if (root != null) root.recycle();
         }
-        WindowSnapshot windows = findUberWindowRoot();
-        boolean found = windows.root != null;
+        WindowSnapshot windows = findUberWindowRoots();
+        boolean found = !windows.roots.isEmpty();
         windows.recycle();
         return found;
     }
@@ -548,28 +678,48 @@ public final class UberAccessibilityService extends AccessibilityService {
 
     private void recordParserDiagnostics(List<AccessibilityNode> snapshot, OfferParseResult result,
                                          EventRequest request, String activePackage, JSONArray windows,
-                                         long processingMillis, boolean monitoringEnabled) {
-        String fingerprint = AccessibilityTreeReader.diagnosticFingerprint(snapshot);
+                                         long processingMillis, boolean monitoringEnabled,
+                                         WindowRoot window, long queueMillis, long treeReadMillis) {
+        String fingerprint = window.id + "|" + AccessibilityTreeReader.diagnosticFingerprint(snapshot);
         boolean candidate = AccessibilityTreeReader.containsOfferCandidate(snapshot);
-        if (captureStore.shouldCaptureTreeSnapshot(fingerprint, candidate)) {
+        boolean relevantTextEvidence = AccessibilityTreeReader.containsRelevantDiagnosticText(snapshot);
+        boolean importantChange = request.isWindowTransition()
+                || request.isTextOrContentChange() && relevantTextEvidence;
+        if (captureStore.shouldCaptureTreeSnapshot(Integer.toString(window.id), fingerprint,
+                candidate, importantChange)) {
             captureStore.record("UBER_TREE_SNAPSHOT", DiagnosticCaptureStore.object(
                     "event_type", request.eventType,
                     "event_type_name", AccessibilityEvent.eventTypeToString(request.eventType),
                     "event_package", request.sourcePackage,
                     "active_package", activePackage,
-                    "event_time_uptime_ms", request.startedAt,
+                    "event_time_uptime_ms", request.eventTimeUptimeMillis,
+                    "request_started_uptime_ms", request.startedAt,
+                    "snapshot_read_uptime_ms", SystemClock.uptimeMillis(),
+                    "queue_delay_ms", Math.max(0, SystemClock.elapsedRealtime() - request.startedAt),
+                    "event_window_id", request.windowId,
+                    "content_change_types", request.contentChangeTypes,
+                    "window_id", window.id, "window_type", window.type, "window_layer", window.layer,
+                    "window_active", window.active, "window_focused", window.focused,
                     "node_count", snapshot.size(), "offer_candidate_text", candidate,
+                    "relevant_text_evidence", relevantTextEvidence,
+                    "snapshot_trigger", request.isWindowTransition() ? "window_transition"
+                            : importantChange ? "relevant_content_change" : "changed_tree",
                     "tree", AccessibilityTreeReader.diagnosticTree(snapshot), "windows", windows));
         } else {
             captureStore.recordSnapshotSkipped(request.startedAt, "unchanged_or_rate_limited_snapshot");
         }
-        if (shouldRecordParserResult(result)) {
+        if (shouldRecordParserResult(result, window.id)) {
             captureStore.record("PARSER_RESULT", DiagnosticCaptureStore.object(
                     "accepted", result.accepted(), "rejection_reason", result.rejectionReason(),
                     "found_fields", DiagnosticCaptureStore.array(result.foundFields()),
                     "unavailable_fields", DiagnosticCaptureStore.array(result.unavailableFields()),
                     "validation_trace", DiagnosticCaptureStore.array(result.diagnosticTrace()),
                     "monitoring_enabled", monitoringEnabled, "processing_ms", processingMillis,
+                    "queue_ms", queueMillis, "tree_read_ms", treeReadMillis,
+                    "event_time_uptime_ms", request.eventTimeUptimeMillis,
+                    "request_window_id", request.windowId, "window_id", window.id,
+                    "window_type", window.type, "window_layer", window.layer,
+                    "window_active", window.active, "window_focused", window.focused,
                     "offer_amount", result.offer() == null ? null : result.offer().offeredAmount(),
                     "category", result.offer() == null ? null
                             : DiagnosticTextSanitizer.sanitizeCategory(result.offer().category()),
@@ -581,7 +731,7 @@ public final class UberAccessibilityService extends AccessibilityService {
         }
     }
 
-    private boolean shouldRecordParserResult(OfferParseResult result) {
+    private boolean shouldRecordParserResult(OfferParseResult result, int windowId) {
         if (captureStore == null) return false;
         String session = captureStore.currentSessionId();
         if (session != null && !session.equals(lastCaptureSessionId)) {
@@ -590,7 +740,7 @@ public final class UberAccessibilityService extends AccessibilityService {
             lastParserDiagnosticFingerprint = null;
             lastParserDiagnosticAt = 0;
         }
-        String fingerprint = result.accepted() + "|" + result.rejectionReason() + "|"
+        String fingerprint = windowId + "|" + result.accepted() + "|" + result.rejectionReason() + "|"
                 + result.foundFields() + "|" + result.unavailableFields() + "|" + result.diagnosticTrace();
         long now = SystemClock.elapsedRealtime();
         boolean shouldRecord = !fingerprint.equals(lastParserDiagnosticFingerprint)
@@ -644,9 +794,9 @@ public final class UberAccessibilityService extends AccessibilityService {
         return true;
     }
 
-    private WindowSnapshot findUberWindowRoot() {
+    private WindowSnapshot findUberWindowRoots() {
         JSONArray metadata = new JSONArray();
-        AccessibilityNodeInfo uberRoot = null;
+        List<WindowRoot> uberRoots = new java.util.ArrayList<>();
         List<AccessibilityWindowInfo> windows = null;
         try {
             windows = getWindows();
@@ -662,8 +812,9 @@ public final class UberAccessibilityService extends AccessibilityService {
                     metadata.put(DiagnosticCaptureStore.object("id", window.getId(), "type", window.getType(),
                             "layer", window.getLayer(), "active", window.isActive(), "focused", window.isFocused(),
                             "root_package", pkg, "bounds", bounds.flattenToString()));
-                    if (uberRoot == null && UBER_PACKAGE.equals(pkg) && root != null) {
-                        uberRoot = AccessibilityNodeInfo.obtain(root);
+                    if (UBER_PACKAGE.equals(pkg) && root != null) {
+                        uberRoots.add(new WindowRoot(window.getId(), window.getType(), window.getLayer(),
+                                window.isActive(), window.isFocused(), AccessibilityNodeInfo.obtain(root)));
                     }
                 } finally { if (root != null) root.recycle(); }
             }
@@ -675,7 +826,11 @@ public final class UberAccessibilityService extends AccessibilityService {
                 if (window != null) window.recycle();
             }
         }
-        return new WindowSnapshot(uberRoot, metadata);
+        return new WindowSnapshot(uberRoots, metadata);
+    }
+
+    private static String packageName(AccessibilityNodeInfo root) {
+        return root == null || root.getPackageName() == null ? "unknown" : root.getPackageName().toString();
     }
 
     private static String safeClass(CharSequence value) {
@@ -683,11 +838,31 @@ public final class UberAccessibilityService extends AccessibilityService {
         return value.toString().replaceAll("[^A-Za-z0-9_.$]", "");
     }
 
-    private static final class WindowSnapshot {
+    private static final class WindowRoot {
+        final int id;
+        final int type;
+        final int layer;
+        final boolean active;
+        final boolean focused;
         AccessibilityNodeInfo root;
-        final JSONArray metadata;
-        WindowSnapshot(AccessibilityNodeInfo root, JSONArray metadata) { this.root = root; this.metadata = metadata; }
+
+        WindowRoot(int id, int type, int layer, boolean active, boolean focused, AccessibilityNodeInfo root) {
+            this.id = id;
+            this.type = type;
+            this.layer = layer;
+            this.active = active;
+            this.focused = focused;
+            this.root = root;
+        }
+
         void recycle() { if (root != null) { root.recycle(); root = null; } }
+    }
+
+    private static final class WindowSnapshot {
+        final List<WindowRoot> roots;
+        final JSONArray metadata;
+        WindowSnapshot(List<WindowRoot> roots, JSONArray metadata) { this.roots = roots; this.metadata = metadata; }
+        void recycle() { for (WindowRoot root : roots) root.recycle(); roots.clear(); }
     }
 
     private void hideOverlay(String reason) { if (overlay != null) overlay.hide(reason); }

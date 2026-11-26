@@ -68,4 +68,14 @@ public final class DiagnosticCapturePolicyTest {
         assertFalse(policy.shouldPersistSnapshot("offer-a", true, 10_999));
         assertTrue(policy.shouldPersistSnapshot("offer-a", true, 11_001));
     }
+
+    @Test
+    public void deduplicatesPerWindowAndKeepsRelevantWindowChangesDuringRateLimit() {
+        DiagnosticCapturePolicy policy = new DiagnosticCapturePolicy();
+        assertTrue(policy.start(1_000, 0, 1_000_000, 100_000));
+        assertTrue(policy.shouldPersistSnapshot("window-1", "map-a", false, false, 1_001));
+        assertTrue(policy.shouldPersistSnapshot("window-2", "map-a", false, false, 1_002));
+        assertFalse(policy.shouldPersistSnapshot("window-1", "map-a", false, false, 1_003));
+        assertTrue(policy.shouldPersistSnapshot("window-1", "offer-fragment", false, true, 1_004));
+    }
 }

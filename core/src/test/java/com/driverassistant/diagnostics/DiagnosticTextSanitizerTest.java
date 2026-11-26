@@ -39,4 +39,13 @@ public final class DiagnosticTextSanitizerTest {
         assertEquals("UberX", DiagnosticTextSanitizer.sanitizeCategory("Uber X"));
         assertNull(DiagnosticTextSanitizer.sanitizeCategory("Maria Silva"));
     }
+
+    @Test
+    public void preservesFragmentedValuesOnlyWhenNearbyContextIdentifiesTheirMeaning() {
+        assertEquals("4,95", DiagnosticTextSanitizer.sanitizeRelevantFragment("4,95", "Nota passageiro"));
+        assertEquals("20,03", DiagnosticTextSanitizer.sanitizeRelevantFragment("20,03", "R$ valor"));
+        assertEquals("1.234,56", DiagnosticTextSanitizer.sanitizeRelevantFragment("1.234,56", "R$ fare"));
+        assertEquals("Uber", DiagnosticTextSanitizer.sanitizeRelevantFragment("Uber", "UberX categoria"));
+        assertTrue(DiagnosticTextSanitizer.sanitizeRelevantFragment("20,03", "mapa Curitiba").isEmpty());
+    }
 }
