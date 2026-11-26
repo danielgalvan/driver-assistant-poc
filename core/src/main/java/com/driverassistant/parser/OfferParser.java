@@ -73,7 +73,7 @@ public final class OfferParser {
             starts.add(composedText.length());
             composedText.append(visibleText);
             lines.add(visibleText);
-            String resourceCue = node == null || node.resourceId() == null ? ""
+            String resourceCue = node == null || !node.visibleToUser() || node.resourceId() == null ? ""
                     : node.resourceId().replaceAll("[^a-zA-Z0-9]+", " ");
             contextLines.add((visibleText + " " + resourceCue).trim());
         }
@@ -88,12 +88,15 @@ public final class OfferParser {
                 && containsAny(allText, "oportunidades", "oportunidade", "bônus por região", "bonus por regiao");
         if (opportunityMap && !hasAcceptanceAction) return rejected("screen_context:offline_opportunity_map");
 
-        boolean explicitOffer = hasAcceptanceAction || containsAny(allText,
+        boolean labeledOffer = containsAny(allText,
                 "oferta r$", "oferta brl", "oferta da viagem", "oferta uber", "nova corrida", "nova oferta",
                 "chamada recebida", "valor da corrida", "valor da viagem");
-        Double amount = findOfferAmount(joinedText, lines, nodes, starts, explicitOffer);
+        boolean explicitOffer = hasAcceptanceAction || labeledOffer;
         Double rating = findRating(contextLines);
         String category = findCategory(contextLines);
+        boolean structuredOfferCard = hasStructuredOfferCard(joinedText, category, rating);
+        boolean hasOfferSignal = explicitOffer || structuredOfferCard;
+        Double amount = findOfferAmount(joinedText, lines, nodes, starts, hasOfferSignal);
         Double pickupDistance = null;
         Double pickupMinutes = null;
         Double tripDistance = null;
@@ -140,19 +143,19 @@ public final class OfferParser {
 
         // Some offer cards expose two unlabeled time/distance pairs in visual order.
         // Use that order only when the same snapshot contains an explicit offer action.
-        if (explicitOffer && unassignedDistances.size() == 2 && pickupDistance == null && tripDistance == null) {
+        if (hasOfferSignal && unassignedDistances.size() == 2 && pickupDistance == null && tripDistance == null) {
             pickupDistance = unassignedDistances.get(0);
             tripDistance = unassignedDistances.get(1);
-        } else if (explicitOffer && unassignedDistances.size() == 1) {
+        } else if (hasOfferSignal && unassignedDistances.size() == 1) {
             if (pickupDistance == null && tripDistance != null) pickupDistance = unassignedDistances.get(0);
             else if (tripDistance == null && pickupDistance != null) tripDistance = unassignedDistances.get(0);
         }
-        if (explicitOffer && unassignedDurations.size() == 2 && !foundPickupDuration && !foundTripDuration) {
+        if (hasOfferSignal && unassignedDurations.size() == 2 && !foundPickupDuration && !foundTripDuration) {
             pickupDuration = unassignedDurations.get(0);
             foundPickupDuration = true;
             tripDuration = unassignedDurations.get(1);
             foundTripDuration = true;
-        } else if (explicitOffer && unassignedDurations.size() == 1) {
+        } else if (hasOfferSignal && unassignedDurations.size() == 1) {
             if (!foundPickupDuration && foundTripDuration) {
                 pickupDuration = unassignedDurations.get(0);
                 foundPickupDuration = true;
@@ -165,11 +168,15 @@ public final class OfferParser {
         if (foundTripDuration) tripMinutes = tripDuration;
 
         String lowerAll = allText;
-        boolean travelContext = containsAny(lowerAll, PICKUP_CUES) || containsAny(lowerAll, TRIP_CUES);
         boolean categoryContext = category != null;
-        if (lowerAll.contains("mapa") && !explicitOffer) return rejected("screen_context:map");
-        boolean hasOfferContext = explicitOffer || (categoryContext && (amount != null || travelContext));
-        if (!hasOfferContext) return rejected("no_offer_context");
+        if (lowerAll.contains("mapa") && !hasOfferSignal) return rejected("screen_context:map");
+        boolean hasSecondaryOfferData = categoryContext || rating != null || pickupDistance != null
+                || pickupMinutes != null || tripDistance != null || tripMinutes != null;
+        // A map can remain behind a request card even when its Accept button is not exposed.
+        // Accept that card only with a category and both pickup/trip distance and duration.
+        boolean hasOfferContext = amount != null && hasSecondaryOfferData
+                && (explicitOffer || structuredOfferCard);
+        if (!hasOfferContext) return rejected("missing_accept_action_or_labeled_fare");
 
         TripOffer offer = new TripOffer(amount, category, rating, pickupDistance, pickupMinutes,
                 tripDistance, tripMinutes, null, null);
@@ -194,6 +201,8 @@ public final class OfferParser {
         int bestScore = Integer.MIN_VALUE;
         Matcher matcher = MONEY.matcher(joinedText);
         while (matcher.find()) {
+            // Uber's map promotions are displayed as +R$ values, while the request fare is not.
+            if (matcher.start() > 0 && joinedText.charAt(matcher.start() - 1) == '+') continue;
             int nodeIndex = nodeIndexAt(starts, matcher.start());
             if (nodeIndex < 0 || nodeIndex >= nodes.size()) continue;
             int fromNode = Math.max(0, nodeIndex - 3);
@@ -208,7 +217,7 @@ public final class OfferParser {
             String ownText = lines.get(nodeIndex).toLowerCase(Locale.ROOT);
             int ownValueIndex = matcher.start() - starts.get(nodeIndex);
             int excludedDistance = nearestCueDistance(ownText, ownValueIndex, EXCLUDED_MONEY_CONTEXT);
-            String ownId = valueNode == null || valueNode.resourceId() == null ? ""
+            String ownId = valueNode == null || !valueNode.visibleToUser() || valueNode.resourceId() == null ? ""
                     : valueNode.resourceId().toLowerCase(Locale.ROOT);
             if (excludedDistance != Integer.MAX_VALUE
                     || containsAny(ownId, "bonus", "surge", "promotion", "incentive", "pickup_fee", "dynamic")) continue;
@@ -216,7 +225,7 @@ public final class OfferParser {
             StringBuilder resourceContext = new StringBuilder();
             for (int index = fromNode; index <= toNode; index++) {
                 AccessibilityNode node = nodes.get(index);
-                if (node != null && node.resourceId() != null) resourceContext.append(' ')
+                if (node != null && node.visibleToUser() && node.resourceId() != null) resourceContext.append(' ')
                         .append(node.resourceId().toLowerCase(Locale.ROOT));
             }
             String ids = resourceContext.toString();
@@ -248,6 +257,23 @@ public final class OfferParser {
                 || after.startsWith("/km") || before.contains("por km");
     }
 
+    private static boolean hasStructuredOfferCard(String text, String category, Double rating) {
+        if (category == null) return false;
+        int distances = 0;
+        Matcher distanceMatcher = DISTANCE.matcher(text);
+        while (distanceMatcher.find()) {
+            if (!isEstimatedPerUnit(text, distanceMatcher.start(), distanceMatcher.end())) distances++;
+        }
+        int durations = 0;
+        Matcher durationMatcher = DURATION.matcher(text);
+        while (durationMatcher.find()) {
+            if (!isThresholdDuration(text, durationMatcher.start())) durations++;
+        }
+        String lower = text.toLowerCase(Locale.ROOT);
+        boolean labeledRoute = containsAny(lower, PICKUP_CUES) && containsAny(lower, TRIP_CUES);
+        return distances >= 2 && durations >= 2 && (rating != null || labeledRoute);
+    }
+
     private static boolean isThresholdDuration(String text, int start) {
         String before = text.substring(Math.max(0, start - 20), start).toLowerCase(Locale.ROOT).trim();
         return before.endsWith("mais de") || before.endsWith("acima de") || before.endsWith(">")
@@ -262,7 +288,8 @@ public final class OfferParser {
         List<Integer> actions = new ArrayList<>();
         for (int index = 0; index < source.size(); index++) {
             AccessibilityNode node = source.get(index);
-            if (node != null && containsAny(node.accessibleText().toLowerCase(Locale.ROOT), "aceitar", "selecionar")) {
+            if (node != null && node.visibleToUser()
+                    && containsAny(node.accessibleText().toLowerCase(Locale.ROOT), "aceitar", "selecionar")) {
                 actions.add(index);
             }
         }
@@ -301,7 +328,8 @@ public final class OfferParser {
             int parent = node.parentOrder() >= 0 && node.parentOrder() < remap.length
                     ? remap[node.parentOrder()] : -1;
             scoped.add(new AccessibilityNode(node.text(), node.contentDescription(), node.resourceId(),
-                    node.className(), parent, Math.max(0, node.depth() - baseDepth), scopedOrder));
+                    node.className(), parent, Math.max(0, node.depth() - baseDepth), scopedOrder,
+                    node.visibleToUser()));
         }
         return scoped;
     }
@@ -327,7 +355,7 @@ public final class OfferParser {
         StringBuilder text = new StringBuilder();
         for (int index : indices) {
             AccessibilityNode node = nodes.get(index);
-            if (node == null) continue;
+            if (node == null || !node.visibleToUser()) continue;
             if (!text.isEmpty()) text.append(' ');
             text.append(node.accessibleText()).append(' ');
             if (node.resourceId() != null) text.append(node.resourceId()).append(' ');
@@ -401,7 +429,8 @@ public final class OfferParser {
         int nodeIndex = nodeIndexAt(starts, valueIndex);
         if (nodeIndex >= 0 && nodeIndex < nodes.size()) {
             AccessibilityNode node = nodes.get(nodeIndex);
-            String id = node == null || node.resourceId() == null ? "" : node.resourceId().toLowerCase(Locale.ROOT);
+            String id = node == null || !node.visibleToUser() || node.resourceId() == null
+                    ? "" : node.resourceId().toLowerCase(Locale.ROOT);
             int resourceKind = resourceTravelContext(id);
             if (resourceKind != 0) return resourceKind;
 
@@ -414,7 +443,7 @@ public final class OfferParser {
             while (parent >= 0 && parent < nodes.size() && levels++ < 8) {
                 AccessibilityNode parentNode = nodes.get(parent);
                 if (parentNode == null) break;
-                int parentKind = resourceTravelContext(parentNode.resourceId() == null ? ""
+                int parentKind = resourceTravelContext(!parentNode.visibleToUser() || parentNode.resourceId() == null ? ""
                         : parentNode.resourceId().toLowerCase(Locale.ROOT));
                 if (parentKind == 0) parentKind = travelContextInText(parentNode.accessibleText().toLowerCase(Locale.ROOT), 0);
                 if (parentKind != 0) return parentKind;
@@ -450,7 +479,7 @@ public final class OfferParser {
             if (index == nodeIndex) continue;
             AccessibilityNode nearby = nodes.get(index);
             if (nearby == null) continue;
-            int kind = resourceTravelContext(nearby.resourceId() == null ? ""
+            int kind = resourceTravelContext(!nearby.visibleToUser() || nearby.resourceId() == null ? ""
                     : nearby.resourceId().toLowerCase(Locale.ROOT));
             if (kind == 0) kind = travelContextInText(nearby.accessibleText().toLowerCase(Locale.ROOT), 0);
             if (kind == 0) continue;

@@ -40,6 +40,7 @@ public final class UberAccessibilityService extends AccessibilityService {
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final AtomicBoolean snapshotDrainScheduled = new AtomicBoolean();
     private final AtomicReference<EventRequest> pendingSnapshot = new AtomicReference<>();
+    private volatile long lastSnapshotRequestAt;
     private final Runnable foregroundWatch = new Runnable() {
         @Override public void run() {
             checkOfferWindow();
@@ -66,10 +67,12 @@ public final class UberAccessibilityService extends AccessibilityService {
     private static final class EventRequest {
         final int eventType;
         final long startedAt;
+        final boolean foregroundPoll;
 
-        EventRequest(int eventType, long startedAt) {
+        EventRequest(int eventType, long startedAt, boolean foregroundPoll) {
             this.eventType = eventType;
             this.startedAt = startedAt;
+            this.foregroundPoll = foregroundPoll;
         }
     }
 
@@ -129,6 +132,7 @@ public final class UberAccessibilityService extends AccessibilityService {
         analysisThread = new HandlerThread("driver-offer-analysis");
         analysisThread.start();
         analysisHandler = new Handler(analysisThread.getLooper());
+        lastSnapshotRequestAt = SystemClock.elapsedRealtime();
         analysisHandler.post(() -> DiagnosticLogStore.record(this, "DA_ACCESSIBILITY",
                 "SERVICE_CONNECTED", "target=uber_driver"));
     }
@@ -152,7 +156,12 @@ public final class UberAccessibilityService extends AccessibilityService {
 
         // Accessibility callbacks arrive on the service's main thread. Keep this path short:
         // reading the window tree can involve hundreds of Binder calls on some driver screens.
-        pendingSnapshot.set(new EventRequest(eventType, startedAt));
+        requestSnapshot(eventType, startedAt, false);
+    }
+
+    private void requestSnapshot(int eventType, long startedAt, boolean foregroundPoll) {
+        lastSnapshotRequestAt = startedAt;
+        pendingSnapshot.set(new EventRequest(eventType, startedAt, foregroundPoll));
         scheduleSnapshotDrain();
     }
 
@@ -176,8 +185,11 @@ public final class UberAccessibilityService extends AccessibilityService {
         int eventType = request.eventType;
         long startedAt = request.startedAt;
         long workerStartedAt = SystemClock.elapsedRealtime();
-        DiagnosticLogStore.markUberEvent(this, Integer.toString(eventType));
-        DiagnosticLogStore.record(this, "DA_ACCESSIBILITY", "UBER_EVENT", "type=" + eventType);
+        String source = request.foregroundPoll ? "foreground_poll" : "accessibility_event";
+        DiagnosticLogStore.markUberEvent(this, request.foregroundPoll ? source : Integer.toString(eventType));
+        DiagnosticLogStore.record(this, "DA_ACCESSIBILITY",
+                request.foregroundPoll ? "FOREGROUND_RECHECK" : "UBER_EVENT",
+                request.foregroundPoll ? "source=" + source : "type=" + eventType);
         if (!config.monitoringEnabled()) {
             disableLifecycleOnAnalysis("monitoring_disabled");
             hideOverlay();
@@ -202,7 +214,7 @@ public final class UberAccessibilityService extends AccessibilityService {
             long treeReadMillis = SystemClock.elapsedRealtime() - treeReadStartedAt;
             root = null; // The reader recycles every visited node, including the root.
             DiagnosticLogStore.record(this, "DA_ACCESSIBILITY", "SNAPSHOT_TIMING",
-                    "queue_ms=" + Math.max(0, workerStartedAt - startedAt)
+                    "source=" + source + "; queue_ms=" + Math.max(0, workerStartedAt - startedAt)
                             + "; tree_ms=" + treeReadMillis + "; nodes=" + snapshot.size());
             if (snapshot.isEmpty()) {
                 processMissing("empty_tree", startedAt);
@@ -322,18 +334,21 @@ public final class UberAccessibilityService extends AccessibilityService {
         DiagnosticLogStore.recordProcessingTime(this, SystemClock.elapsedRealtime() - startedAt);
     }
 
-    /** Called by the main-thread poll; all lifecycle mutation remains serial on analysisHandler. */
+    /** Polls the real Uber window when accessibility events stop arriving during an active offer. */
     private void checkOfferWindow() {
         if (activeOfferSnapshot == null || config == null || !config.monitoringEnabled() || analysisHandler == null) return;
         boolean uberForeground = isUberWindowActive();
-        analysisHandler.post(() -> {
-            if (lifecycle == null || lifecycle.activeOffer() == null || !config.monitoringEnabled()) return;
-            if (uberForeground) {
-                lifecycle.observe(Optional.of(lifecycle.activeOffer()), SystemClock.uptimeMillis());
-            } else {
-                processMissing("uber_left_foreground", SystemClock.elapsedRealtime());
+        if (uberForeground) {
+            long now = SystemClock.elapsedRealtime();
+            if (now - lastSnapshotRequestAt >= FOREGROUND_POLL_MILLIS) {
+                requestSnapshot(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED, now, true);
             }
-        });
+        } else {
+            analysisHandler.post(() -> {
+                if (lifecycle == null || lifecycle.activeOffer() == null || !config.monitoringEnabled()) return;
+                processMissing("uber_left_foreground", SystemClock.elapsedRealtime());
+            });
+        }
     }
 
     private boolean isUberWindowActive() {

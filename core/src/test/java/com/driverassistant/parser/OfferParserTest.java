@@ -95,6 +95,94 @@ public final class OfferParserTest {
         assertEquals("screen_context:offline_opportunity_map", parsed.rejectionReason());
     }
 
+    @Test public void doesNotPromoteAnUnlabeledMapAmountAndTravelCueToAnOffer() {
+        OfferParseResult parsed = parser.parseNodes(List.of(
+                AccessibilityNode.textOnly("UberX", 0),
+                AccessibilityNode.textOnly("Oportunidades", 1),
+                AccessibilityNode.textOnly("+R$ 14,75", 2),
+                AccessibilityNode.textOnly("5 min", 3),
+                AccessibilityNode.textOnly("12 km de viagem", 4)));
+        assertFalse(parsed.accepted());
+        assertEquals("missing_accept_action_or_labeled_fare", parsed.rejectionReason());
+    }
+
+    @Test public void hiddenStaleAcceptAndOfferLabelsDoNotTurnMapSurgeIntoAnOffer() {
+        OfferParseResult parsed = parser.parseNodes(List.of(
+                new AccessibilityNode("Tela Uber", null, "root", "FrameLayout", -1, 0, 0),
+                new AccessibilityNode("Ficar online", null, "home/go_online", "Button", 0, 1, 1),
+                new AccessibilityNode("Oportunidades", null, "home/opportunities", "TextView", 0, 1, 2),
+                new AccessibilityNode("UberX", null, "map/category", "TextView", 0, 1, 3),
+                new AccessibilityNode("+R$ 12,75", null, "map/promotion", "TextView", 0, 1, 4),
+                new AccessibilityNode("Aceitar", null, "request/accept", "Button", 0, 1, 5, false),
+                new AccessibilityNode("Oferta Uber", null, "request/title", "TextView", 0, 1, 6, false)));
+
+        assertFalse(parsed.accepted());
+        assertEquals("screen_context:offline_opportunity_map", parsed.rejectionReason());
+    }
+
+    @Test public void fareAndVisibleActionWithoutIndependentOfferDataAreRejected() {
+        OfferParseResult parsed = parser.parseNodes(List.of(
+                new AccessibilityNode("Oferta Uber", null, "request/title", "TextView", 0, 1, 0),
+                new AccessibilityNode("R$ 14,75", null, "map/promotion", "TextView", 0, 1, 1),
+                new AccessibilityNode("Aceitar", null, "request/accept", "Button", 0, 1, 2),
+                new AccessibilityNode("UberX", null, "request/category", "TextView", 0, 1, 3, false)));
+
+        assertFalse(parsed.accepted());
+        assertEquals("missing_accept_action_or_labeled_fare", parsed.rejectionReason());
+    }
+
+    @Test public void parsesSimulatedOfferCardOnMapWithoutAccessibleAcceptButton() {
+        OfferParseResult parsed = parser.parseNodes(List.of(
+                AccessibilityNode.textOnly("Mapa", 0),
+                AccessibilityNode.textOnly("UberX Exclusivo", 1),
+                AccessibilityNode.textOnly("R$ 20,03", 2),
+                AccessibilityNode.textOnly("★ 5,00 (19)", 3),
+                AccessibilityNode.textOnly("5 min (0,6 km) até o embarque", 4),
+                AccessibilityNode.textOnly("45 minutos (20,3 km) de viagem", 5),
+                AccessibilityNode.textOnly("+R$ 7,75 incluído", 6)));
+
+        assertTrue(parsed.accepted());
+        assertEquals(20.03, parsed.offer().offeredAmount(), 0.0001);
+        assertEquals("UberX", parsed.offer().category());
+        assertEquals(5.0, parsed.offer().passengerRating(), 0.0001);
+        assertEquals(0.6, parsed.offer().pickupDistanceKm(), 0.0001);
+        assertEquals(5.0, parsed.offer().pickupEtaMinutes(), 0.0001);
+        assertEquals(20.3, parsed.offer().tripDistanceKm(), 0.0001);
+        assertEquals(45.0, parsed.offer().tripDurationMinutes(), 0.0001);
+    }
+
+    @Test public void structuredMapOfferCardStillWorksWhenPassengerRatingIsUnavailable() {
+        OfferParseResult parsed = parser.parseNodes(List.of(
+                AccessibilityNode.textOnly("Mapa", 0),
+                AccessibilityNode.textOnly("Comfort", 1),
+                AccessibilityNode.textOnly("R$ 20,03", 2),
+                AccessibilityNode.textOnly("7 min (0,8 km) até o embarque", 3),
+                AccessibilityNode.textOnly("33 min (10,8 km) de viagem", 4)));
+
+        assertTrue(parsed.accepted());
+        assertEquals(20.03, parsed.offer().offeredAmount(), 0.0001);
+        assertEquals("Comfort", parsed.offer().category());
+        assertNull(parsed.offer().passengerRating());
+        assertEquals(0.8, parsed.offer().pickupDistanceKm(), 0.0001);
+        assertEquals(7.0, parsed.offer().pickupEtaMinutes(), 0.0001);
+        assertEquals(10.8, parsed.offer().tripDistanceKm(), 0.0001);
+        assertEquals(33.0, parsed.offer().tripDurationMinutes(), 0.0001);
+    }
+
+    @Test public void mapPromotionsAreIgnoredWhenTheyLackRideCardEvidence() {
+        OfferParseResult parsed = parser.parseNodes(List.of(
+                AccessibilityNode.textOnly("Mapa", 0),
+                AccessibilityNode.textOnly("UberX", 1),
+                AccessibilityNode.textOnly("+R$ 12,75", 2),
+                AccessibilityNode.textOnly("1 min", 3),
+                AccessibilityNode.textOnly("0,6 km", 4),
+                AccessibilityNode.textOnly("5 min", 5),
+                AccessibilityNode.textOnly("6,2 km", 6)));
+
+        assertFalse(parsed.accepted());
+        assertEquals("screen_context:map", parsed.rejectionReason());
+    }
+
     @Test public void parsesSimulatedUberXRequestInsteadOfMapBonusAndEstimate() {
         TripOffer offer = parser.parse(List.of(
                 "UberX Exclusivo", "R$ 36,03", "Est. de R$ 1,72/km", "★ 5,00 (19)",
