@@ -1,7 +1,7 @@
 <resources>
     <string name="app_name">Driver Assistant</string>
     <string name="accessibility_service_label">Monitoramento do Uber Driver</string>
-    <string name="accessibility_service_description">Lê a árvore de acessibilidade do Uber Driver para identificar ofertas e exibir uma análise local. Não aceita nem recusa corridas.</string>
+    <string name="accessibility_service_description">Observa metadados de eventos e janelas para detectar quando o Uber Driver está visível. Lê a árvore de acessibilidade somente do Uber Driver; não aceita nem recusa corridas.</string>
     <string name="home_title">Driver Assistant</string>
     <string name="home_subtitle">Diagnóstico local de ofertas</string>
     <string name="section_status">Status</string>
@@ -10,7 +10,28 @@
     <string name="status_uber">Uber Driver detectado: %1$s</string>
     <string name="status_overlay">Cartão flutuante: %1$s (configuração: %2$s)</string>
     <string name="permission_status">Permissões necessárias — acessibilidade: %1$s; sobreposição: integrada ao serviço</string>
-    <string name="accessibility_disclosure">Com o monitoramento ativado, o app lê textos acessíveis do Uber Driver para calcular a oferta localmente. Não envia dados, não guarda nomes ou endereços e não aceita nem recusa corridas.</string>
+    <string name="accessibility_disclosure">O serviço observa apenas metadados de eventos de janela para detectar o app em primeiro plano. Somente a árvore do Uber Driver é lida; conteúdo de outros apps não é aberto. A análise é local e não aceita nem recusa corridas.</string>
+    <string name="capture_title">Captura detalhada (temporária)</string>
+    <string name="capture_disclosure">Ative manualmente antes de testar. Registros anonimizados são gravados no aparelho, mesmo com o Driver Assistant em segundo plano. Limite atual: %1$d MB; sessão máxima: 8 horas. Nada é enviado pela rede. Encerre e exporte o ZIP após o teste.</string>
+    <string name="capture_status_active">Captura ATIVA · %1$s · %2$.2f / %3$.0f MB · %4$s</string>
+    <string name="capture_status_inactive">Captura inativa · %1$s · %2$.2f / %3$.0f MB · %4$s</string>
+    <string name="capture_running">em execução</string>
+    <string name="capture_start">Iniciar diagnóstico</string>
+    <string name="capture_stop">Encerrar diagnóstico</string>
+    <string name="capture_export">Exportar sessão ZIP (JSON)</string>
+    <string name="capture_limit">Limite de armazenamento: %1$d MB</string>
+    <string name="capture_limit_title">Limite da captura local</string>
+    <string name="capture_started">Captura local iniciada</string>
+    <string name="capture_start_failed">Não foi possível iniciar. Exporte ou limpe os registros existentes para liberar espaço.</string>
+    <string name="capture_stopped">Captura encerrada</string>
+    <string name="capture_export_saved">ZIP salvo em Downloads/Driver Assistant</string>
+    <string name="capture_export_failed">Não foi possível exportar o diagnóstico</string>
+    <string name="capture_export_stop_first">Encerre a captura antes de exportar o ZIP.</string>
+    <string name="capture_clear_active">Encerre a captura antes de limpar os dados.</string>
+    <plurals name="capture_event_count">
+        <item quantity="one">%d evento capturado</item>
+        <item quantity="other">%d eventos capturados</item>
+    </plurals>
     <string name="yes">Sim</string>
     <string name="no">Não</string>
     <string name="enabled">Ativado</string>
@@ -26,7 +47,7 @@
     <string name="last_uber_event">Último evento da Uber: %1$s</string>
     <string name="active_offer_status">Oferta ativa: %1$s</string>
     <string name="clear_diagnostics">Limpar dados de diagnóstico</string>
-    <string name="confirm_clear_diagnostics">As contagens, o último resumo da oferta e os eventos locais serão apagados.</string>
+    <string name="confirm_clear_diagnostics">Os eventos locais e a sessão de captura detalhada serão apagados.</string>
     <string name="diagnostics_cleared">Dados de diagnóstico limpos</string>
     <string name="none_yet">Nenhuma</string>
     <string name="recent_events">Eventos recentes</string>

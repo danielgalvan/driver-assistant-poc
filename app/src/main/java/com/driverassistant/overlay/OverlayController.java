@@ -27,6 +27,8 @@ import com.driverassistant.domain.Signal;
 import com.driverassistant.domain.TripOffer;
 import com.driverassistant.lifecycle.OverlaySessionPolicy;
 import com.driverassistant.util.DiagnosticLogStore;
+import com.driverassistant.util.DiagnosticCaptureStore;
+import com.driverassistant.diagnostics.DiagnosticTextSanitizer;
 
 import java.util.Locale;
 
@@ -49,8 +51,11 @@ public final class OverlayController {
 
     public void show(TripOffer offer, RideMetrics metrics, ClassificationResult classification,
                      long sessionId, boolean simulated) {
+        recordCapture("OVERLAY_SHOW_REQUESTED", offer, sessionId, simulated,
+                "overlay_enabled=" + (config.overlayEnabled() || simulated));
         if (!config.overlayEnabled() && !simulated) {
-            hide();
+            recordCapture("OVERLAY_SHOW_SUPPRESSED", offer, sessionId, simulated, "reason=overlay_disabled");
+            hide("overlay_disabled");
             return;
         }
         long requestedAt = android.os.SystemClock.uptimeMillis();
@@ -58,9 +63,19 @@ public final class OverlayController {
     }
 
     public void hide() {
+        hide("unspecified");
+    }
+
+    public void hide(String reason) {
         handler.post(() -> {
+            boolean wasVisible = visible;
             sessionPolicy.clear();
-            removeOnMainThread();
+            boolean removed = removeOnMainThread();
+            if (wasVisible) {
+                recordCapture("OVERLAY_REMOVE_REQUESTED", null, 0, false, "reason=" + safe(reason));
+                recordCapture("OVERLAY_REMOVED", null, 0, false,
+                        "reason=" + safe(reason) + "; removed=" + removed);
+            }
         });
     }
 
@@ -75,11 +90,16 @@ public final class OverlayController {
             String fingerprint = displayFingerprint(offer, metrics, classification);
             OverlaySessionPolicy.Decision decision = sessionPolicy.show(sessionId, fingerprint, now, durationMillis);
             if (decision == OverlaySessionPolicy.Decision.EXPIRED) {
-                removeOnMainThread();
+                boolean removed = removeOnMainThread();
                 DiagnosticLogStore.record(service, "DA_OVERLAY", "OVERLAY_EXPIRED", "session=" + sessionId);
+                recordCapture("OVERLAY_EXPIRED", offer, sessionId, simulated,
+                        "reason=session_expired; removed=" + removed);
                 return;
             }
-            if (decision == OverlaySessionPolicy.Decision.DUPLICATE) return;
+            if (decision == OverlaySessionPolicy.Decision.DUPLICATE) {
+                recordCapture("OVERLAY_SHOW_SUPPRESSED", offer, sessionId, simulated, "reason=duplicate");
+                return;
+            }
             if (card == null) {
                 ContextThemeWrapper themedContext = new ContextThemeWrapper(service, R.style.Theme_DriverAssistant);
                 card = LayoutInflater.from(themedContext).inflate(R.layout.overlay_offer_card, null, false);
@@ -97,8 +117,10 @@ public final class OverlayController {
                 long currentSession = sessionId;
                 dismissTask = () -> {
                     if (sessionPolicy.expire(currentSession, android.os.SystemClock.uptimeMillis())) {
-                        removeOnMainThread();
+                        boolean removed = removeOnMainThread();
                         DiagnosticLogStore.record(service, "DA_OVERLAY", "OVERLAY_EXPIRED", "session=" + currentSession);
+                        recordCapture("OVERLAY_EXPIRED", offer, currentSession, simulated,
+                                "reason=display_duration; removed=" + removed);
                     }
                 };
                 handler.postDelayed(dismissTask, sessionPolicy.remainingMillis(now));
@@ -107,8 +129,14 @@ public final class OverlayController {
                     decision == OverlaySessionPolicy.Decision.NEW_SESSION ? "OVERLAY_SHOWN" : "OVERLAY_UPDATED",
                     "source=" + (simulated ? "simulation" : "uber") + "; session=" + sessionId
                             + "; main_queue_ms=" + Math.max(0, android.os.SystemClock.uptimeMillis() - requestedAt));
+            recordCapture(decision == OverlaySessionPolicy.Decision.NEW_SESSION
+                    ? "OVERLAY_SHOWN" : "OVERLAY_UPDATED", offer, sessionId, simulated,
+                    "decision=" + decision + "; visible=" + visible + "; main_queue_ms="
+                            + Math.max(0, android.os.SystemClock.uptimeMillis() - requestedAt));
         } catch (RuntimeException exception) {
             DiagnosticLogStore.record(service, "DA_OVERLAY", "OVERLAY_ERROR",
+                    "exception=" + exception.getClass().getSimpleName());
+            recordCapture("OVERLAY_ERROR", offer, sessionId, simulated,
                     "exception=" + exception.getClass().getSimpleName());
             sessionPolicy.clear();
             removeOnMainThread();
@@ -339,17 +367,37 @@ public final class OverlayController {
         return Math.round(value * service.getResources().getDisplayMetrics().density);
     }
 
-    private void removeOnMainThread() {
+    private boolean removeOnMainThread() {
         if (dismissTask != null) handler.removeCallbacks(dismissTask);
         dismissTask = null;
+        boolean removed = true;
         if (card != null && card.getParent() != null) {
             try {
                 windowManager.removeView(card);
             } catch (RuntimeException ignored) {
-                // O sistema pode remover a janela durante a desconexão do serviço.
+                removed = false;
             }
         }
         visible = false;
+        return removed;
+    }
+
+    private void recordCapture(String kind, TripOffer offer, long sessionId, boolean simulated, String reason) {
+        DiagnosticCaptureStore store = DiagnosticCaptureStore.get(service);
+        if (!store.isActive()) return;
+        store.record(kind, DiagnosticCaptureStore.object(
+                "session_id", sessionId, "simulated", simulated, "reason", reason,
+                "amount", offer == null ? null : offer.offeredAmount(),
+                "category", offer == null ? null : DiagnosticTextSanitizer.sanitizeCategory(offer.category()),
+                "rating", offer == null ? null : offer.passengerRating(),
+                "pickup_km", offer == null ? null : offer.pickupDistanceKm(),
+                "pickup_minutes", offer == null ? null : offer.pickupEtaMinutes(),
+                "trip_km", offer == null ? null : offer.tripDistanceKm(),
+                "trip_minutes", offer == null ? null : offer.tripDurationMinutes()));
+    }
+
+    private static String safe(String value) {
+        return value == null ? "unknown" : value.replaceAll("[^A-Za-z0-9_:-]", "_");
     }
 
     private static String displayFingerprint(TripOffer offer, RideMetrics metrics,

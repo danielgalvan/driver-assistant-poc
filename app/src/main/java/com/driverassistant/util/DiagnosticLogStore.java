@@ -10,6 +10,7 @@ import com.driverassistant.diagnostics.BoundedEventBuffer;
 import com.driverassistant.diagnostics.EventRateLimiter;
 import com.driverassistant.domain.RideMetrics;
 import com.driverassistant.domain.TripOffer;
+import com.driverassistant.diagnostics.DiagnosticTextSanitizer;
 import com.driverassistant.parser.OfferParseResult;
 
 import java.text.SimpleDateFormat;
@@ -179,7 +180,8 @@ public final class DiagnosticLogStore {
         if (offer == null) return "Oferta incompleta";
         List<String> fields = new ArrayList<>();
         fields.add("valor=" + money(offer.offeredAmount()));
-        if (offer.category() != null) fields.add("categoria=" + offer.category());
+        String category = DiagnosticTextSanitizer.sanitizeCategory(offer.category());
+        if (category != null) fields.add("categoria=" + category);
         fields.add("nota=" + decimal(offer.passengerRating()));
         fields.add("embarque=" + distance(offer.pickupDistanceKm()) + "/" + duration(offer.pickupEtaMinutes()));
         fields.add("viagem=" + distance(offer.tripDistanceKm()) + "/" + duration(offer.tripDurationMinutes()));

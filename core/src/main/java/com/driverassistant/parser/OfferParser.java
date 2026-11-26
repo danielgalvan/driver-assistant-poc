@@ -1,6 +1,7 @@
 package com.driverassistant.parser;
 
 import com.driverassistant.domain.TripOffer;
+import com.driverassistant.diagnostics.DiagnosticTextSanitizer;
 
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -61,8 +62,16 @@ public final class OfferParser {
     }
 
     public OfferParseResult parseNodes(List<AccessibilityNode> nodes) {
-        if (nodes == null || nodes.isEmpty()) return rejected("empty_tree");
-        nodes = isolateOfferCard(nodes);
+        return parseNodes(nodes, false);
+    }
+
+    /** Runs the same parser rules and optionally returns their individual decisions for a capture session. */
+    public OfferParseResult parseNodes(List<AccessibilityNode> nodes, boolean detailedDiagnostics) {
+        List<String> trace = detailedDiagnostics ? new ArrayList<>() : null;
+        if (nodes == null || nodes.isEmpty()) return rejected("empty_tree", trace);
+        int sourceNodeCount = nodes.size();
+        nodes = isolateOfferCard(nodes, trace);
+        addTrace(trace, "isolateOfferCard source_nodes=" + sourceNodeCount + "; parsed_nodes=" + nodes.size());
         List<String> lines = new ArrayList<>(nodes.size());
         List<String> contextLines = new ArrayList<>(nodes.size());
         List<Integer> starts = new ArrayList<>(nodes.size());
@@ -79,24 +88,36 @@ public final class OfferParser {
         }
         String joinedText = composedText.toString();
         String allText = joinedText.toLowerCase(Locale.ROOT);
+        String excludedScreen = null;
         for (String excluded : EXCLUDED_SCREENS) {
-            if (allText.contains(excluded)) return rejected("screen_context:" + excluded.replace(' ', '_'));
+            if (allText.contains(excluded)) {
+                excludedScreen = excluded;
+                break;
+            }
         }
+        addTrace(trace, "EXCLUDED_SCREENS matched=" + (excludedScreen == null ? "none" : excludedScreen.replace(' ', '_')));
+        if (excludedScreen != null) return rejected("screen_context:" + excludedScreen.replace(' ', '_'), trace);
 
         boolean hasAcceptanceAction = containsAny(allText, "aceitar", "selecionar");
+        addTrace(trace, "hasAcceptanceAction=" + hasAcceptanceAction);
         boolean opportunityMap = containsAny(allText, "ficar online")
                 && containsAny(allText, "oportunidades", "oportunidade", "bônus por região", "bonus por regiao");
-        if (opportunityMap && !hasAcceptanceAction) return rejected("screen_context:offline_opportunity_map");
+        addTrace(trace, "offlineOpportunityMap=" + opportunityMap + "; acceptanceAction=" + hasAcceptanceAction);
+        if (opportunityMap && !hasAcceptanceAction) return rejected("screen_context:offline_opportunity_map", trace);
 
         boolean labeledOffer = containsAny(allText,
                 "oferta r$", "oferta brl", "oferta da viagem", "oferta uber", "nova corrida", "nova oferta",
                 "chamada recebida", "valor da corrida", "valor da viagem");
         boolean explicitOffer = hasAcceptanceAction || labeledOffer;
+        addTrace(trace, "labeledOffer=" + labeledOffer + "; explicitOffer=" + explicitOffer);
         Double rating = findRating(contextLines);
         String category = findCategory(contextLines);
-        boolean structuredOfferCard = hasStructuredOfferCard(joinedText, category, rating);
+        addTrace(trace, "fields category=" + safeTraceValue(DiagnosticTextSanitizer.sanitizeCategory(category))
+                + "; rating=" + safeTraceValue(rating));
+        boolean structuredOfferCard = hasStructuredOfferCard(joinedText, category, rating, trace);
         boolean hasOfferSignal = explicitOffer || structuredOfferCard;
-        Double amount = findOfferAmount(joinedText, lines, nodes, starts, hasOfferSignal);
+        addTrace(trace, "hasOfferSignal=" + hasOfferSignal);
+        Double amount = findOfferAmount(joinedText, lines, nodes, starts, hasOfferSignal, trace);
         Double pickupDistance = null;
         Double pickupMinutes = null;
         Double tripDistance = null;
@@ -107,14 +128,21 @@ public final class OfferParser {
         Matcher distanceMatcher = DISTANCE.matcher(joinedText);
         while (distanceMatcher.find()) {
             String unit = distanceMatcher.group(2).toLowerCase(Locale.ROOT);
-            if (isEstimatedPerUnit(joinedText, distanceMatcher.start(), distanceMatcher.end())) continue;
+            if (isEstimatedPerUnit(joinedText, distanceMatcher.start(), distanceMatcher.end())) {
+                addTrace(trace, "distance_candidate value=" + distanceMatcher.group(1) + unit + "; rejected=estimated_per_unit");
+                continue;
+            }
             double parsed = number(distanceMatcher.group(1), LocalizedNumberParser.Context.DISTANCE);
-            if (!Double.isFinite(parsed) || parsed < 0) continue;
+            if (!Double.isFinite(parsed) || parsed < 0) {
+                addTrace(trace, "distance_candidate value=" + distanceMatcher.group(1) + unit + "; rejected=invalid_number");
+                continue;
+            }
             if (unit.equals("m") || unit.startsWith("metro")) parsed /= 1000.0;
             int contextKind = nearestTravelContext(distanceMatcher.start(), nodes, starts);
             if (contextKind == 1 && pickupDistance == null) pickupDistance = parsed;
             else if (contextKind == 2 && tripDistance == null) tripDistance = parsed;
             else if (contextKind == 0) unassignedDistances.add(parsed);
+            addTrace(trace, "distance_candidate parsed_km=" + parsed + "; context=" + travelContextName(contextKind));
         }
 
         double pickupDuration = 0;
@@ -123,14 +151,23 @@ public final class OfferParser {
         boolean foundTripDuration = false;
         Matcher durationMatcher = DURATION.matcher(joinedText);
         while (durationMatcher.find()) {
-            if (isThresholdDuration(joinedText, durationMatcher.start())) continue;
+            if (isThresholdDuration(joinedText, durationMatcher.start())) {
+                addTrace(trace, "duration_candidate value=" + durationMatcher.group(1) + durationMatcher.group(2)
+                        + "; rejected=threshold_text");
+                continue;
+            }
             double parsed = number(durationMatcher.group(1), LocalizedNumberParser.Context.DURATION);
-            if (!Double.isFinite(parsed) || parsed < 0) continue;
+            if (!Double.isFinite(parsed) || parsed < 0) {
+                addTrace(trace, "duration_candidate value=" + durationMatcher.group(1) + durationMatcher.group(2)
+                        + "; rejected=invalid_number");
+                continue;
+            }
             if (durationMatcher.group(2).toLowerCase(Locale.ROOT).startsWith("h")) parsed *= 60.0;
             int contextKind = nearestTravelContext(durationMatcher.start(), nodes, starts);
             if (contextKind == 1) { pickupDuration += parsed; foundPickupDuration = true; }
             else if (contextKind == 2) { tripDuration += parsed; foundTripDuration = true; }
             else if (contextKind == 0) unassignedDurations.add(parsed);
+            addTrace(trace, "duration_candidate parsed_minutes=" + parsed + "; context=" + travelContextName(contextKind));
         }
         Matcher shortMinutes = COMPOUND_SHORT_MINUTES.matcher(joinedText);
         while (shortMinutes.find()) {
@@ -166,17 +203,27 @@ public final class OfferParser {
         }
         if (foundPickupDuration) pickupMinutes = pickupDuration;
         if (foundTripDuration) tripMinutes = tripDuration;
+        addTrace(trace, "travel_fields pickup_distance_km=" + safeTraceValue(pickupDistance)
+                + "; pickup_minutes=" + safeTraceValue(pickupMinutes)
+                + "; trip_distance_km=" + safeTraceValue(tripDistance)
+                + "; trip_minutes=" + safeTraceValue(tripMinutes));
 
         String lowerAll = allText;
         boolean categoryContext = category != null;
-        if (lowerAll.contains("mapa") && !hasOfferSignal) return rejected("screen_context:map");
+        if (lowerAll.contains("mapa") && !hasOfferSignal) {
+            addTrace(trace, "mapScreen=true; hasOfferSignal=false; result=rejected");
+            return rejected("screen_context:map", trace);
+        }
         boolean hasSecondaryOfferData = categoryContext || rating != null || pickupDistance != null
                 || pickupMinutes != null || tripDistance != null || tripMinutes != null;
+        addTrace(trace, "hasSecondaryOfferData=" + hasSecondaryOfferData);
         // A map can remain behind a request card even when its Accept button is not exposed.
         // Accept that card only with a category and both pickup/trip distance and duration.
         boolean hasOfferContext = amount != null && hasSecondaryOfferData
                 && (explicitOffer || structuredOfferCard);
-        if (!hasOfferContext) return rejected("missing_accept_action_or_labeled_fare");
+        addTrace(trace, "hasOfferContext=" + hasOfferContext + "; amount=" + safeTraceValue(amount)
+                + "; explicitOffer=" + explicitOffer + "; structuredOfferCard=" + structuredOfferCard);
+        if (!hasOfferContext) return rejected("missing_accept_action_or_labeled_fare", trace);
 
         TripOffer offer = new TripOffer(amount, category, rating, pickupDistance, pickupMinutes,
                 tripDistance, tripMinutes, null, null);
@@ -191,20 +238,29 @@ public final class OfferParser {
         Set<String> unavailable = new LinkedHashSet<>(List.of("offered_amount", "category", "passenger_rating",
                 "pickup_distance", "pickup_time", "trip_distance", "trip_time"));
         unavailable.removeAll(found);
-        return new OfferParseResult(offer, null, found, unavailable);
+        addTrace(trace, "parser_result=accepted; found=" + String.join(",", found)
+                + "; unavailable=" + String.join(",", unavailable));
+        return new OfferParseResult(offer, null, found, unavailable, trace);
     }
 
     private static Double findOfferAmount(String joinedText, List<String> lines,
                                           List<AccessibilityNode> nodes, List<Integer> starts,
-                                          boolean explicitOffer) {
+                                          boolean explicitOffer, List<String> trace) {
         Double selected = null;
         int bestScore = Integer.MIN_VALUE;
         Matcher matcher = MONEY.matcher(joinedText);
         while (matcher.find()) {
-            // Uber's map promotions are displayed as +R$ values, while the request fare is not.
-            if (matcher.start() > 0 && joinedText.charAt(matcher.start() - 1) == '+') continue;
+            String raw = matcher.group(1) != null ? matcher.group(1) : matcher.group(2);
             int nodeIndex = nodeIndexAt(starts, matcher.start());
-            if (nodeIndex < 0 || nodeIndex >= nodes.size()) continue;
+            // Uber's map promotions are displayed as +R$ values, while the request fare is not.
+            if (matcher.start() > 0 && joinedText.charAt(matcher.start() - 1) == '+') {
+                addTrace(trace, "money_candidate raw=" + raw + "; node=" + nodeIndex + "; rejected=plus_prefixed_map_addition");
+                continue;
+            }
+            if (nodeIndex < 0 || nodeIndex >= nodes.size()) {
+                addTrace(trace, "money_candidate raw=" + raw + "; node=" + nodeIndex + "; rejected=node_not_found");
+                continue;
+            }
             int fromNode = Math.max(0, nodeIndex - 3);
             int toNode = Math.min(nodes.size() - 1, nodeIndex + 3);
             int fromChar = starts.get(fromNode);
@@ -219,8 +275,16 @@ public final class OfferParser {
             int excludedDistance = nearestCueDistance(ownText, ownValueIndex, EXCLUDED_MONEY_CONTEXT);
             String ownId = valueNode == null || !valueNode.visibleToUser() || valueNode.resourceId() == null ? ""
                     : valueNode.resourceId().toLowerCase(Locale.ROOT);
-            if (excludedDistance != Integer.MAX_VALUE
-                    || containsAny(ownId, "bonus", "surge", "promotion", "incentive", "pickup_fee", "dynamic")) continue;
+            if (excludedDistance != Integer.MAX_VALUE) {
+                addTrace(trace, "money_candidate raw=" + raw + "; node=" + nodeIndex
+                        + "; rejected=excluded_money_context");
+                continue;
+            }
+            if (containsAny(ownId, "bonus", "surge", "promotion", "incentive", "pickup_fee", "dynamic")) {
+                addTrace(trace, "money_candidate raw=" + raw + "; node=" + nodeIndex
+                        + "; rejected=excluded_resource_id");
+                continue;
+            }
 
             StringBuilder resourceContext = new StringBuilder();
             for (int index = fromNode; index <= toNode; index++) {
@@ -229,15 +293,25 @@ public final class OfferParser {
                         .append(node.resourceId().toLowerCase(Locale.ROOT));
             }
             String ids = resourceContext.toString();
-            if (containsAny(ownId, "bonus", "surge", "promotion", "incentive", "pickup_fee", "dynamic")) continue;
+            if (containsAny(ownId, "bonus", "surge", "promotion", "incentive", "pickup_fee", "dynamic")) {
+                addTrace(trace, "money_candidate raw=" + raw + "; node=" + nodeIndex
+                        + "; rejected=nearby_excluded_resource_id");
+                continue;
+            }
 
             // Bare currency values are accepted only on a snapshot with an explicit offer action.
             if (offerDistance == Integer.MAX_VALUE && !explicitOffer
-                    && !containsAny(ids, "fare", "price", "offer", "amount", "payout")) continue;
+                    && !containsAny(ids, "fare", "price", "offer", "amount", "payout")) {
+                addTrace(trace, "money_candidate raw=" + raw + "; node=" + nodeIndex
+                        + "; rejected=no_offer_cue_or_resource_id");
+                continue;
+            }
 
-            Double value = LocalizedNumberParser.parse(matcher.group(1) != null ? matcher.group(1) : matcher.group(2),
-                    LocalizedNumberParser.Context.MONEY);
-            if (value == null || value < 0) continue;
+            Double value = LocalizedNumberParser.parse(raw, LocalizedNumberParser.Context.MONEY);
+            if (value == null || value < 0) {
+                addTrace(trace, "money_candidate raw=" + raw + "; node=" + nodeIndex + "; rejected=invalid_money");
+                continue;
+            }
             int score = 0;
             if (lowerLocalContext.contains("oferta") || lowerLocalContext.contains("valor da corrida")
                     || lowerLocalContext.contains("valor da viagem") || lowerLocalContext.contains("preço total")) score += 8;
@@ -245,8 +319,14 @@ public final class OfferParser {
             if (lowerLocalContext.contains("r$") || lowerLocalContext.contains("brl")) score += 2;
             if (containsAny(ids, "fare", "price", "offer", "amount", "payout")) score += 6;
             if (containsAny(lowerLocalContext, "uberx", "comfort", "black", "priority")) score += 1;
-            if (score > bestScore) { bestScore = score; selected = value; }
+            boolean selectedCandidate = score > bestScore;
+            addTrace(trace, "money_candidate value=" + value + "; node=" + nodeIndex + "; score=" + score
+                    + "; offer_cue_distance=" + (offerDistance == Integer.MAX_VALUE ? "none" : offerDistance)
+                    + "; selected=" + selectedCandidate);
+            if (selectedCandidate) { bestScore = score; selected = value; }
         }
+        addTrace(trace, "findOfferAmount selected=" + safeTraceValue(selected) + "; score="
+                + (selected == null ? "none" : bestScore));
         return selected;
     }
 
@@ -257,8 +337,11 @@ public final class OfferParser {
                 || after.startsWith("/km") || before.contains("por km");
     }
 
-    private static boolean hasStructuredOfferCard(String text, String category, Double rating) {
-        if (category == null) return false;
+    private static boolean hasStructuredOfferCard(String text, String category, Double rating, List<String> trace) {
+        if (category == null) {
+            addTrace(trace, "hasStructuredOfferCard=false; category_missing=true");
+            return false;
+        }
         int distances = 0;
         Matcher distanceMatcher = DISTANCE.matcher(text);
         while (distanceMatcher.find()) {
@@ -271,7 +354,10 @@ public final class OfferParser {
         }
         String lower = text.toLowerCase(Locale.ROOT);
         boolean labeledRoute = containsAny(lower, PICKUP_CUES) && containsAny(lower, TRIP_CUES);
-        return distances >= 2 && durations >= 2 && (rating != null || labeledRoute);
+        boolean result = distances >= 2 && durations >= 2 && (rating != null || labeledRoute);
+        addTrace(trace, "hasStructuredOfferCard=" + result + "; distances=" + distances + "; durations=" + durations
+                + "; ratingPresent=" + (rating != null) + "; labeledRoute=" + labeledRoute);
+        return result;
     }
 
     private static boolean isThresholdDuration(String text, int start) {
@@ -281,7 +367,7 @@ public final class OfferParser {
     }
 
     /** Narrows parsing to the smallest accessibility subtree that contains an offer action and its data. */
-    private static List<AccessibilityNode> isolateOfferCard(List<AccessibilityNode> source) {
+    private static List<AccessibilityNode> isolateOfferCard(List<AccessibilityNode> source, List<String> trace) {
         int bestRoot = -1;
         List<Integer> bestDescendants = null;
         int bestScore = -1;
@@ -293,7 +379,10 @@ public final class OfferParser {
                 actions.add(index);
             }
         }
-        if (actions.isEmpty()) return source;
+        if (actions.isEmpty()) {
+            addTrace(trace, "isolateOfferCard actions=0; result=unchanged");
+            return source;
+        }
 
         for (int action : actions) {
             int ancestor = action;
@@ -311,7 +400,12 @@ public final class OfferParser {
                 ancestor = parent == null ? -1 : parent.parentOrder();
             }
         }
-        if (bestRoot < 0 || bestDescendants == null || bestDescendants.size() >= source.size()) return source;
+        if (bestRoot < 0 || bestDescendants == null || bestDescendants.size() >= source.size()) {
+            addTrace(trace, "isolateOfferCard actions=" + actions.size() + "; selected=false; result=unchanged");
+            return source;
+        }
+        addTrace(trace, "isolateOfferCard actions=" + actions.size() + "; selected=true; root=" + bestRoot
+                + "; score=" + bestScore + "; scoped_nodes=" + bestDescendants.size());
 
         int[] remap = new int[source.size()];
         for (int index = 0; index < remap.length; index++) remap[index] = -1;
@@ -533,11 +627,32 @@ public final class OfferParser {
         return false;
     }
 
+    private static void addTrace(List<String> trace, String value) {
+        if (trace != null) trace.add(value);
+    }
+
+    private static String safeTraceValue(Object value) {
+        return value == null ? "null" : String.valueOf(value);
+    }
+
+    private static String travelContextName(int kind) {
+        return switch (kind) {
+            case 1 -> "pickup";
+            case 2 -> "trip";
+            default -> "unassigned";
+        };
+    }
+
     private static void addIf(Set<String> found, String name, Object value) { if (value != null) found.add(name); }
 
     private static OfferParseResult rejected(String reason) {
+        return rejected(reason, List.of());
+    }
+
+    private static OfferParseResult rejected(String reason, List<String> trace) {
+        addTrace(trace, "parser_result=rejected; reason=" + reason);
         Set<String> unavailable = new LinkedHashSet<>(List.of("offered_amount", "category", "passenger_rating",
                 "pickup_distance", "pickup_time", "trip_distance", "trip_time"));
-        return new OfferParseResult(null, reason, Set.of(), unavailable);
+        return new OfferParseResult(null, reason, Set.of(), unavailable, trace);
     }
 }

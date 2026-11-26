@@ -109,6 +109,68 @@
                 android:orientation="vertical"
                 android:padding="18dp">
                 <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/capture_title"
+                    android:textColor="@color/ink"
+                    android:textSize="18sp"
+                    android:textStyle="bold" />
+                <TextView
+                    android:id="@+id/capture_status"
+                    style="@style/StatusLine"
+                    android:paddingTop="8dp" />
+                <TextView
+                    android:id="@+id/capture_disclosure"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:paddingTop="4dp"
+                    android:textColor="@color/ink_secondary"
+                    android:textSize="12sp" />
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/capture_start_button"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="@string/capture_start" />
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/capture_stop_button"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/capture_stop" />
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/capture_export_button"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/capture_export" />
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/capture_limit_button"
+                    style="@style/Widget.Material3.Button.TextButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/capture_limit" />
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/clear_diagnostics_button"
+                    style="@style/Widget.Material3.Button.TextButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/clear_diagnostics" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            app:cardCornerRadius="18dp"
+            app:cardElevation="1dp">
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="18dp">
+                <TextView
                     android:id="@+id/offer_count"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
@@ -199,11 +261,5 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="@string/export_logs" />
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/clear_diagnostics_button"
-            style="@style/Widget.Material3.Button.TextButton"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/clear_diagnostics" />
     </LinearLayout>
 </ScrollView>

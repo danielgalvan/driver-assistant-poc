@@ -2,6 +2,10 @@ package com.driverassistant.ui;
 
 import android.content.ComponentName;
 import android.content.Intent;
+import android.content.ContentValues;
+import android.net.Uri;
+import android.os.Environment;
+import android.provider.MediaStore;
 import android.content.res.ColorStateList;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -28,6 +32,7 @@ import com.driverassistant.domain.RideMetrics;
 import com.driverassistant.domain.Signal;
 import com.driverassistant.domain.TripOffer;
 import com.driverassistant.util.DiagnosticLogStore;
+import com.driverassistant.util.DiagnosticCaptureStore;
 import com.google.android.material.card.MaterialCardView;
 import com.google.android.material.button.MaterialButton;
 
@@ -37,10 +42,17 @@ import android.os.Looper;
 
 import java.util.List;
 import java.util.Locale;
+import java.util.Date;
+import java.text.SimpleDateFormat;
+import java.io.OutputStream;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public final class MainActivity extends AppCompatActivity {
+    private static final ExecutorService CAPTURE_EXPORT_EXECUTOR = Executors.newSingleThreadExecutor();
     private final Handler handler = new Handler(Looper.getMainLooper());
     private ConfigRepository config;
+    private DiagnosticCaptureStore captureStore;
     private TextView accessibilityStatus;
     private TextView permissionStatus;
     private TextView monitoringStatus;
@@ -54,6 +66,13 @@ public final class MainActivity extends AppCompatActivity {
     private TextView incompleteOfferCount;
     private TextView lastOffer;
     private TextView recentEvents;
+    private TextView captureStatus;
+    private TextView captureDisclosure;
+    private MaterialButton captureStartButton;
+    private MaterialButton captureStopButton;
+    private MaterialButton captureExportButton;
+    private MaterialButton captureLimitButton;
+    private boolean captureExportInProgress;
     private MaterialCardView simulationCard;
     private LinearLayout simulationContent;
 
@@ -69,6 +88,7 @@ public final class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
         config = new ConfigRepository(this);
+        captureStore = DiagnosticCaptureStore.get(this);
 
         accessibilityStatus = findViewById(R.id.accessibility_status);
         permissionStatus = findViewById(R.id.permission_status);
@@ -83,6 +103,12 @@ public final class MainActivity extends AppCompatActivity {
         incompleteOfferCount = findViewById(R.id.incomplete_offer_count);
         lastOffer = findViewById(R.id.last_offer);
         recentEvents = findViewById(R.id.recent_events);
+        captureStatus = findViewById(R.id.capture_status);
+        captureDisclosure = findViewById(R.id.capture_disclosure);
+        captureStartButton = findViewById(R.id.capture_start_button);
+        captureStopButton = findViewById(R.id.capture_stop_button);
+        captureExportButton = findViewById(R.id.capture_export_button);
+        captureLimitButton = findViewById(R.id.capture_limit_button);
         simulationCard = findViewById(R.id.simulation_card);
         simulationContent = findViewById(R.id.simulation_content);
 
@@ -95,6 +121,11 @@ public final class MainActivity extends AppCompatActivity {
         findViewById(R.id.test_overlay_button).setOnClickListener(view -> chooseOverlayScenario());
         findViewById(R.id.export_button).setOnClickListener(view -> exportLogs());
         findViewById(R.id.clear_diagnostics_button).setOnClickListener(view -> clearDiagnostics());
+        captureStartButton.setOnClickListener(view -> startCapture());
+        captureStopButton.setOnClickListener(view -> stopCapture());
+        captureExportButton.setOnClickListener(view -> exportCapture());
+        captureLimitButton.setOnClickListener(view -> chooseCaptureLimit());
+        refreshCaptureStatus();
     }
 
     @Override protected void onResume() {
@@ -150,6 +181,100 @@ public final class MainActivity extends AppCompatActivity {
         for (int index = 0; index < count; index++) visibleEvents.append("\n").append(events.get(index));
         if (count == 0) visibleEvents.append("\n—");
         recentEvents.setText(visibleEvents.toString());
+        refreshCaptureStatus();
+    }
+
+    private void refreshCaptureStatus() {
+        DiagnosticCaptureStore.Status status = captureStore.status();
+        String reason = status.stopReason() == null ? "—" : status.stopReason();
+        String eventCount = getResources().getQuantityString(R.plurals.capture_event_count,
+                (int) status.eventCount(), status.eventCount());
+        captureStatus.setText(getString(status.active() ? R.string.capture_status_active : R.string.capture_status_inactive,
+                eventCount, status.usedMegabytes(), status.limitMegabytes(),
+                status.active() ? getString(R.string.capture_running) : reason));
+        captureDisclosure.setText(getString(R.string.capture_disclosure, status.configuredLimitMb()));
+        captureLimitButton.setText(getString(R.string.capture_limit, status.configuredLimitMb()));
+        captureStartButton.setEnabled(!status.active());
+        captureStopButton.setEnabled(status.active());
+        captureExportButton.setEnabled(!status.active() && status.bytes() > 0 && !captureExportInProgress);
+    }
+
+    private void startCapture() {
+        if (captureStore.startCapture()) {
+            Toast.makeText(this, R.string.capture_started, Toast.LENGTH_SHORT).show();
+        } else {
+            Toast.makeText(this, R.string.capture_start_failed, Toast.LENGTH_LONG).show();
+        }
+        refreshCaptureStatus();
+    }
+
+    private void stopCapture() {
+        captureStore.stopCapture("manual_from_ui");
+        Toast.makeText(this, R.string.capture_stopped, Toast.LENGTH_SHORT).show();
+        refreshCaptureStatus();
+    }
+
+    private void chooseCaptureLimit() {
+        String[] choices = {"10 MB", "25 MB", "50 MB", "100 MB"};
+        int current = switch (captureStore.storageLimitMb()) {
+            case 10 -> 0;
+            case 25 -> 1;
+            case 100 -> 3;
+            default -> 2;
+        };
+        new MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.capture_limit_title)
+                .setSingleChoiceItems(choices, current, (dialog, which) -> {
+                    int[] limits = {10, 25, 50, 100};
+                    captureStore.setStorageLimitMb(limits[which]);
+                    refreshCaptureStatus();
+                    dialog.dismiss();
+                })
+                .setNegativeButton(android.R.string.cancel, null)
+                .show();
+    }
+
+    private void exportCapture() {
+        if (captureStore.isActive()) {
+            Toast.makeText(this, R.string.capture_export_stop_first, Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (captureExportInProgress) return;
+        captureExportInProgress = true;
+        refreshCaptureStatus();
+        CAPTURE_EXPORT_EXECUTOR.execute(() -> {
+            Uri uri = null;
+            try {
+                String name = "driver-assistant-diagnostic-" + new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.ROOT)
+                        .format(new Date()) + ".zip";
+                ContentValues values = new ContentValues();
+                values.put(MediaStore.Downloads.DISPLAY_NAME, name);
+                values.put(MediaStore.Downloads.MIME_TYPE, "application/zip");
+                values.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Driver Assistant");
+                values.put(MediaStore.Downloads.IS_PENDING, 1);
+                uri = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+                if (uri == null) throw new IllegalStateException("Destino de download indisponível");
+                try (OutputStream output = getContentResolver().openOutputStream(uri, "w")) {
+                    if (output == null) throw new IllegalStateException("Arquivo de exportação indisponível");
+                    captureStore.exportZip(output);
+                }
+                ContentValues published = new ContentValues();
+                published.put(MediaStore.Downloads.IS_PENDING, 0);
+                getContentResolver().update(uri, published, null, null);
+                runOnUiThread(() -> {
+                    captureExportInProgress = false;
+                    refreshCaptureStatus();
+                    Toast.makeText(this, R.string.capture_export_saved, Toast.LENGTH_LONG).show();
+                });
+            } catch (Exception failure) {
+                if (uri != null) getContentResolver().delete(uri, null, null);
+                runOnUiThread(() -> {
+                    captureExportInProgress = false;
+                    refreshCaptureStatus();
+                    Toast.makeText(this, R.string.capture_export_failed, Toast.LENGTH_LONG).show();
+                });
+            }
+        });
     }
 
     private boolean isAccessibilityServiceEnabled() {
@@ -398,14 +523,20 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void clearDiagnostics() {
+        if (captureStore.isActive()) {
+            Toast.makeText(this, R.string.capture_clear_active, Toast.LENGTH_LONG).show();
+            return;
+        }
         new MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.clear_diagnostics)
                 .setMessage(R.string.confirm_clear_diagnostics)
                 .setNegativeButton(android.R.string.cancel, null)
                 .setPositiveButton(android.R.string.ok, (dialog, which) -> {
-                    DiagnosticLogStore.clear(this);
-                    refreshScreen();
-                    Toast.makeText(this, R.string.diagnostics_cleared, Toast.LENGTH_SHORT).show();
+                    captureStore.clearCapture(() -> {
+                        DiagnosticLogStore.clear(this);
+                        refreshScreen();
+                        Toast.makeText(this, R.string.diagnostics_cleared, Toast.LENGTH_SHORT).show();
+                    });
                 })
                 .show();
     }
