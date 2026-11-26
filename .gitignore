@@ -6,5 +6,6 @@ local.properties
 *.apk
 *.aab
 captures/
+diagnostics/
 .externalNativeBuild/
 .cxx/
