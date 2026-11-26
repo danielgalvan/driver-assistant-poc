@@ -39,6 +39,10 @@
     <string name="open_accessibility">Abrir configurações de acessibilidade</string>
     <string name="monitoring_start_button">MONITORAMENTO DESATIVADO\nToque para ativar</string>
     <string name="monitoring_stop_button">MONITORAMENTO ATIVADO\nToque para desativar</string>
+    <string name="monitoring_stop_button_disconnected">MONITORAMENTO SEM SERVIÇO\nToque para desativar</string>
+    <string name="monitoring_not_operational">Não operacional: serviço desconectado</string>
+    <string name="accessibility_required_title">Serviço de acessibilidade necessário</string>
+    <string name="accessibility_service_not_connected_message">O Android mostra o serviço Driver Assistant habilitado, mas ele não está conectado. O monitoramento e a captura continuam desligados. Nas configurações de acessibilidade, desligue e ligue o serviço Driver Assistant; volte ao app e aguarde o status conectado.</string>
     <string name="detected_offers">Ofertas reais detectadas: %1$d</string>
     <string name="incomplete_offers">Ofertas incompletas: %1$d</string>
     <string name="last_offer">Última oferta: %1$s</string>
