@@ -28,6 +28,7 @@ import com.driverassistant.domain.TripOffer;
 import com.driverassistant.lifecycle.OfferLifecycleEvent;
 import com.driverassistant.lifecycle.OfferLifecycleMachine;
 import com.driverassistant.lifecycle.OfferLifecycleState;
+import com.driverassistant.lifecycle.UberPageContextDetector;
 import com.driverassistant.diagnostics.BoundedEventQueue;
 import com.driverassistant.diagnostics.ForegroundPollPolicy;
 import com.driverassistant.overlay.OverlayController;
@@ -70,6 +71,7 @@ public final class UberAccessibilityService extends AccessibilityService {
         @Override public void run() { runForegroundPoll(); }
     };
     private final OfferParser parser = new OfferParser();
+    private final UberPageContextDetector pageContextDetector = new UberPageContextDetector();
     private final AccessibilityTreeReader treeReader = new AccessibilityTreeReader();
     private final OfferCaptureCoordinator captureCoordinator = new OfferCaptureCoordinator();
     private final VisualOfferDetector visualOfferDetector = new VisualOfferDetector();
@@ -87,6 +89,7 @@ public final class UberAccessibilityService extends AccessibilityService {
     private HandlerThread analysisThread;
     private Handler analysisHandler;
     private volatile TripOffer activeOfferSnapshot;
+    private volatile UberPageContextDetector.Page uberPageContext = UberPageContextDetector.Page.UNKNOWN;
     private volatile long simulationEpoch;
     private volatile boolean paused;
     private volatile boolean shuttingDown;
@@ -98,6 +101,7 @@ public final class UberAccessibilityService extends AccessibilityService {
     private volatile long lastPollStatusAt;
     private volatile long lastPollTimingAt;
     private volatile long lastPollStartedAt;
+    private long lastPageSuppressionDiagnosticAt;
     private String lastCaptureSessionId;
     private String lastParserDiagnosticFingerprint;
     private long lastParserDiagnosticAt;
@@ -281,6 +285,7 @@ public final class UberAccessibilityService extends AccessibilityService {
         shuttingDown = false;
         activeService = this;
         connected = true;
+        uberPageContext = UberPageContextDetector.Page.UNKNOWN;
         config = new ConfigRepository(this);
         captureStore = DiagnosticCaptureStore.get(this);
         overlay = new OverlayController(this);
@@ -476,6 +481,10 @@ public final class UberAccessibilityService extends AccessibilityService {
         boolean captureActive = captureStore != null && captureStore.isActive();
         boolean monitoringEnabled = config.monitoringEnabled();
         OfferCaptureStrategy strategy = config.offerCaptureStrategy();
+        if (!request.snapshot.isEmpty()) {
+            updateUberPageContext(request.snapshot, source,
+                    request.foregroundPoll && (request.windowActive || request.windowFocused));
+        }
         if (!monitoringEnabled && !captureActive) {
             disableLifecycleOnAnalysis("monitoring_disabled");
             hideOverlay("monitoring_disabled");
@@ -900,11 +909,52 @@ public final class UberAccessibilityService extends AccessibilityService {
         applyOffer(result.offer(), startedAt, snapshotOrigin);
     }
 
+    private void updateUberPageContext(List<AccessibilityNode> snapshot, String source,
+                                       boolean authoritativeForegroundSnapshot) {
+        UberPageContextDetector.Page detected = pageContextDetector.detect(snapshot);
+        if (detected == UberPageContextDetector.Page.UNKNOWN && !authoritativeForegroundSnapshot) return;
+        UberPageContextDetector.Page previous = uberPageContext;
+        if (previous == detected) return;
+        uberPageContext = detected;
+        String reason = detected == UberPageContextDetector.Page.HOME
+                ? "selected_home_tab" : detected == UberPageContextDetector.Page.OTHER
+                ? "selected_non_home_tab" : "home_tab_unconfirmed";
+        DiagnosticLogStore.record(this, "DA_PAGE", "UBER_PAGE_CONTEXT",
+                "page=" + detected.name() + "; reason=" + reason + "; source=" + safeReason(source));
+        if (captureStore != null && captureStore.isActive()) {
+            captureStore.record("UBER_PAGE_CONTEXT", DiagnosticCaptureStore.object(
+                    "from", previous.name(), "to", detected.name(), "reason", reason,
+                    "source", source, "authoritative_foreground_snapshot", authoritativeForegroundSnapshot));
+        }
+        if (detected != UberPageContextDetector.Page.HOME) {
+            visualCaptureGeneration.incrementAndGet();
+            if (screenshotCaptureSource != null) screenshotCaptureSource.cancelPending();
+            disableLifecycleOnAnalysis("uber_page_" + detected.name().toLowerCase(java.util.Locale.ROOT));
+            hideOverlay("uber_page_not_home");
+        }
+    }
+
     private void applyOffer(TripOffer newOffer, long startedAt, String snapshotOrigin) {
         if (newOffer == null || lifecycle == null || config == null || !config.monitoringEnabled()) return;
+        if (uberPageContext != UberPageContextDetector.Page.HOME) {
+            long now = SystemClock.elapsedRealtime();
+            if (now - lastPageSuppressionDiagnosticAt >= 5_000) {
+                if (captureStore != null && captureStore.isActive()) {
+                    captureStore.record("OFFER_SUPPRESSED_PAGE_CONTEXT", DiagnosticCaptureStore.object(
+                            "page", uberPageContext.name(), "snapshot_origin", snapshotOrigin,
+                            "reason", "uber_home_tab_not_confirmed"));
+                }
+                DiagnosticLogStore.record(this, "DA_OFFER", "OFFER_SUPPRESSED_PAGE_CONTEXT",
+                        "page=" + uberPageContext.name() + "; source=" + safeReason(snapshotOrigin));
+                lastPageSuppressionDiagnosticAt = now;
+            }
+            if (overlay != null && overlay.isVisible()) hideOverlay("uber_page_not_home");
+            return;
+        }
         OfferLifecycleEvent transition = lifecycle.observe(Optional.of(newOffer), SystemClock.uptimeMillis());
         recordLifecycle(transition, newOffer);
         if (!transition.transitioned()) {
+            if (overlay != null) overlay.keepAlive(transition.sessionId());
             DiagnosticLogStore.recordProcessingTime(this, SystemClock.elapsedRealtime() - startedAt);
             return;
         }
@@ -1000,6 +1050,26 @@ public final class UberAccessibilityService extends AccessibilityService {
             });
             OfferCaptureStrategy strategy = config.offerCaptureStrategy();
             if (strategy == OfferCaptureStrategy.OCR_ONLY) {
+                int pageRoots = Math.min(MAX_POLL_WINDOWS, windows.roots.size());
+                for (int index = 0; index < pageRoots; index++) {
+                    WindowRoot pageWindow = windows.roots.get(index);
+                    AccessibilityNodeInfo pageRoot = pageWindow.root;
+                    pageWindow.root = null;
+                    if (pageRoot == null) continue;
+                    List<AccessibilityNode> pageSnapshot;
+                    try {
+                        pageSnapshot = treeReader.read(pageRoot, MAX_POLL_NODES);
+                    } catch (RuntimeException exception) {
+                        if (captureStore != null && captureStore.isActive()) {
+                            captureStore.record("PROCESSING_EXCEPTION", DiagnosticCaptureStore.object(
+                                    "exception", exception.getClass().getSimpleName(),
+                                    "stage", "page_context_tree_read", "window_id", pageWindow.id));
+                        }
+                        continue;
+                    }
+                    updateUberPageContext(pageSnapshot, "uber_window_poll_ocr_only",
+                            pageWindow.active || pageWindow.focused);
+                }
                 WindowRoot target = windows.roots.get(0);
                 requestVisualCapture(target.id, "foreground_poll_ocr_only", null, true, pollStartedAt);
                 return;
@@ -1491,6 +1561,11 @@ public final class UberAccessibilityService extends AccessibilityService {
     }
 
     private void showSimulation(TripOffer offer, long session) {
+        if (uberPageContext != UberPageContextDetector.Page.HOME) {
+            DiagnosticLogStore.record(this, "DA_OVERLAY", "SIMULATION_OVERLAY_SUPPRESSED",
+                    "page=" + uberPageContext.name() + "; reason=uber_home_tab_not_confirmed");
+            return;
+        }
         RideMetrics metrics = calculator.calculate(offer);
         ClassificationResult classification = classificationService.classify(metrics, offer.passengerRating(), config.loadThresholds());
         overlay.show(offer, metrics, classification, session, true);
@@ -1500,6 +1575,10 @@ public final class UberAccessibilityService extends AccessibilityService {
         Handler handler = analysisHandler;
         if (handler == null) return;
         handler.post(() -> {
+            if (uberPageContext != UberPageContextDetector.Page.HOME) {
+                hideOverlay("uber_page_not_home");
+                return;
+            }
             TripOffer offer = lifecycle == null ? null : lifecycle.activeOffer();
             if (offer == null || !config.monitoringEnabled()) return;
             RideMetrics metrics = calculator.calculate(offer);

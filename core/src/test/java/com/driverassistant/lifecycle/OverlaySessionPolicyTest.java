@@ -32,4 +32,21 @@ public final class OverlaySessionPolicyTest {
         policy.clear();
         assertEquals(OverlaySessionPolicy.Decision.NEW_SESSION, policy.show(4, "real", 300, 5_000));
     }
+
+    @Test public void activeOfferObservationsExtendTheStaleCardWatchdog() {
+        OverlaySessionPolicy policy = new OverlaySessionPolicy();
+        policy.show(15, "offer", 1_000, 10_000);
+
+        assertTrue(policy.refresh(15, 9_000, 10_000));
+        assertFalse(policy.expire(15, 10_001));
+        assertEquals(8_999, policy.remainingMillis(10_001));
+    }
+
+    @Test public void expiredSessionCannotBeRefreshed() {
+        OverlaySessionPolicy policy = new OverlaySessionPolicy();
+        policy.show(16, "offer", 1_000, 1_000);
+        assertTrue(policy.expire(16, 2_000));
+
+        assertFalse(policy.refresh(16, 2_100, 1_000));
+    }
 }

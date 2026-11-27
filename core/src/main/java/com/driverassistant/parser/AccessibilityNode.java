@@ -10,15 +10,25 @@ public final class AccessibilityNode {
     private final int depth;
     private final int order;
     private final boolean visibleToUser;
+    private final boolean selected;
+    private final boolean checked;
 
     public AccessibilityNode(String text, String contentDescription, String resourceId,
                              String className, int parentOrder, int depth, int order) {
-        this(text, contentDescription, resourceId, className, parentOrder, depth, order, true);
+        this(text, contentDescription, resourceId, className, parentOrder, depth, order,
+                true, false, false);
     }
 
     public AccessibilityNode(String text, String contentDescription, String resourceId,
                              String className, int parentOrder, int depth, int order,
                              boolean visibleToUser) {
+        this(text, contentDescription, resourceId, className, parentOrder, depth, order,
+                visibleToUser, false, false);
+    }
+
+    public AccessibilityNode(String text, String contentDescription, String resourceId,
+                             String className, int parentOrder, int depth, int order,
+                             boolean visibleToUser, boolean selected, boolean checked) {
         this.text = text;
         this.contentDescription = contentDescription;
         this.resourceId = resourceId;
@@ -27,6 +37,8 @@ public final class AccessibilityNode {
         this.depth = depth;
         this.order = order;
         this.visibleToUser = visibleToUser;
+        this.selected = selected;
+        this.checked = checked;
     }
 
     public static AccessibilityNode textOnly(String text, int order) {
@@ -41,6 +53,8 @@ public final class AccessibilityNode {
     public int depth() { return depth; }
     public int order() { return order; }
     public boolean visibleToUser() { return visibleToUser; }
+    public boolean selected() { return selected; }
+    public boolean checked() { return checked; }
 
     public String accessibleText() {
         if (!visibleToUser) return "";

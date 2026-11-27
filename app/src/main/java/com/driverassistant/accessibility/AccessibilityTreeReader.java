@@ -105,6 +105,8 @@ public final class AccessibilityTreeReader {
                 item.put("resource_id", node.resourceId() == null ? JSONObject.NULL : node.resourceId());
                 item.put("class", node.className() == null ? JSONObject.NULL : node.className());
                 item.put("visible", node.visibleToUser());
+                item.put("selected", node.selected());
+                item.put("checked", node.checked());
                 String context = localContext(node, byOrder, siblings);
                 item.put("text", DiagnosticTextSanitizer.sanitizeRelevantFragment(node.text(), context));
                 item.put("content_description", DiagnosticTextSanitizer.sanitizeRelevantFragment(
@@ -125,7 +127,8 @@ public final class AccessibilityTreeReader {
             String context = localContext(node, byOrder, siblings);
             value.append(node.order()).append('|').append(node.parentOrder()).append('|').append(node.depth())
                     .append('|').append(node.resourceId()).append('|').append(node.className())
-                    .append('|').append(node.visibleToUser()).append('|')
+                    .append('|').append(node.visibleToUser()).append('|').append(node.selected())
+                    .append('|').append(node.checked()).append('|')
                     .append(DiagnosticTextSanitizer.sanitizeRelevantFragment(node.text(), context)).append('|')
                     .append(DiagnosticTextSanitizer.sanitizeRelevantFragment(node.contentDescription(), context)).append('\n');
         }
@@ -175,7 +178,8 @@ public final class AccessibilityTreeReader {
             if (node == null) continue;
             value.append(node.order()).append('|').append(node.parentOrder()).append('|')
                     .append(node.resourceId()).append('|').append(node.className()).append('|')
-                    .append(node.visibleToUser()).append('|').append(node.accessibleText()).append('\n');
+                    .append(node.visibleToUser()).append('|').append(node.selected()).append('|')
+                    .append(node.checked()).append('|').append(node.accessibleText()).append('\n');
         }
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256")
@@ -264,7 +268,7 @@ public final class AccessibilityTreeReader {
             boolean visible = node.isVisibleToUser();
             output.add(new AccessibilityNode(toString(text), toString(description),
                     node.getViewIdResourceName(), className == null ? null : className.toString(),
-                    parentOrder, depth, order, visible));
+                    parentOrder, depth, order, visible, node.isSelected(), node.isChecked()));
             if (!visible) return;
             int childCount = node.getChildCount();
             for (int index = 0; index < childCount && output.size() < maxNodes; index++) {

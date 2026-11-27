@@ -35,6 +35,14 @@ public final class OverlaySessionPolicy {
         return true;
     }
 
+    /** Extends the stale-card watchdog when the same pending offer is still being observed. */
+    public boolean refresh(long expectedSessionId, long nowMillis, long durationMillis) {
+        if (durationMillis <= 0) throw new IllegalArgumentException("duration must be positive");
+        if (sessionId != expectedSessionId || lastExpiredSessionId == expectedSessionId) return false;
+        deadlineMillis = nowMillis + durationMillis;
+        return true;
+    }
+
     public long remainingMillis(long nowMillis) { return Math.max(0, deadlineMillis - nowMillis); }
     public long sessionId() { return sessionId; }
     public boolean active() { return sessionId != Long.MIN_VALUE; }
