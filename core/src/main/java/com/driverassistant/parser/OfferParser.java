@@ -235,7 +235,7 @@ public final class OfferParser {
         if (!hasOfferContext) return rejected("missing_accept_action_or_labeled_fare", trace);
 
         TripOffer offer = new TripOffer(amount, category, rating, pickupDistance, pickupMinutes,
-                tripDistance, tripMinutes, null, null);
+                tripDistance, tripMinutes);
         Set<String> found = new LinkedHashSet<>();
         addIf(found, "offered_amount", amount);
         addIf(found, "category", category);

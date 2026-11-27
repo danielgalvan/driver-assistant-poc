@@ -30,6 +30,16 @@ public final class DiagnosticCapturePolicyTest {
     }
 
     @Test
+    public void reservesSpaceForTerminalEventBeforeStorageLimitIsReached() {
+        DiagnosticCapturePolicy policy = new DiagnosticCapturePolicy();
+        assertTrue(policy.start(10, 100, 1_000, 10_000));
+        assertEquals(DiagnosticCapturePolicy.AppendResult.APPENDED, policy.reserve(11, 700, 200));
+        assertEquals(DiagnosticCapturePolicy.AppendResult.STORAGE_LIMIT, policy.reserve(12, 1, 200));
+        assertFalse(policy.active());
+        assertEquals(800, policy.reservedBytes());
+    }
+
+    @Test
     public void resumesAfterProcessRestartAndStopsAtSessionDuration() {
         DiagnosticCapturePolicy policy = new DiagnosticCapturePolicy();
         assertTrue(policy.resume(5_000, 1_000, 4, 500, 10_000, 10_000));
