@@ -5,6 +5,7 @@ import android.content.SharedPreferences;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
 
 import com.driverassistant.diagnostics.DiagnosticCapturePolicy;
@@ -63,6 +64,8 @@ public final class DiagnosticCaptureStore {
     private volatile boolean active;
     private volatile boolean clearing;
     private volatile long eventCount;
+    private volatile long lastWriteQueueMillis;
+    private volatile long lastWriteDurationMillis;
     private String sessionId;
     private long sessionStartedAt;
     private long sessionMaxStorageBytes;
@@ -292,6 +295,10 @@ public final class DiagnosticCaptureStore {
         synchronized (lock) { return sessionId; }
     }
 
+    /** Latest asynchronous append timing, for measuring diagnostic overhead without synchronous disk I/O. */
+    public long lastWriteQueueMillis() { return lastWriteQueueMillis; }
+    public long lastWriteDurationMillis() { return lastWriteDurationMillis; }
+
     public boolean isActive() { return status().active(); }
 
     public int storageLimitMb() {
@@ -337,19 +344,26 @@ public final class DiagnosticCaptureStore {
         nextSequence = sequence;
         eventCount = sequence;
         reservedBytes += bytes;
-        writer.post(() -> appendLine(line));
+        long enqueuedAtElapsed = SystemClock.elapsedRealtime();
+        writer.post(() -> appendLine(line, enqueuedAtElapsed));
     }
 
-    private void appendLine(String line) {
-        try (BufferedWriter output = new BufferedWriter(new OutputStreamWriter(
-                new FileOutputStream(eventsFile, true), StandardCharsets.UTF_8))) {
-            output.write(line);
-            output.flush();
+    private void appendLine(String line, long enqueuedAtElapsed) {
+        long writeStartedAt = SystemClock.elapsedRealtime();
+        lastWriteQueueMillis = Math.max(0, writeStartedAt - enqueuedAtElapsed);
+        try {
+            try (BufferedWriter output = new BufferedWriter(new OutputStreamWriter(
+                    new FileOutputStream(eventsFile, true), StandardCharsets.UTF_8))) {
+                output.write(line);
+                output.flush();
+            }
         } catch (IOException failure) {
             Log.e(TAG, "Falha ao gravar sessão de diagnóstico", failure);
             synchronized (lock) {
                 if (active) autoStopLocked("storage_write_error");
             }
+        } finally {
+            lastWriteDurationMillis = Math.max(0, SystemClock.elapsedRealtime() - writeStartedAt);
         }
     }
 

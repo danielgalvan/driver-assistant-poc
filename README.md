@@ -15,8 +15,12 @@ driver-assistant/
 `app` depende de `core`; `core` não depende do Android. Assim, regras de negócio podem ser testadas na JVM sem abrir uma Activity ou simular serviços do sistema.
 
 ```text
-AccessibilityService → AccessibilityTreeReader → OfferParser
-                                               → TripOffer
+AccessibilityService event
+  ├─ event source → bounded immutable snapshot → coalescing queue ─┐
+  └─ Uber-window poll (350 ms, adaptive backoff) ───────────────────┤
+                                                                   ▼
+                                                            OfferParser
+                                                                 → TripOffer
 TripOffer → OfferLifecycleMachine → ProfitabilityCalculator → ClassificationService
                                                         ↘ OverlayController
 ```
@@ -131,7 +135,17 @@ adb logcat -s DA_ACCESSIBILITY DA_PARSER DA_OFFER DA_CALCULATOR DA_OVERLAY DA_CO
 4. Toque em **Exportar sessão ZIP (JSON)**. O arquivo fica em `Downloads/Driver Assistant/driver-assistant-diagnostic-AAAAmmdd-HHmmss.zip`; dentro dele, `diagnostics.json` contém eventos cronológicos e snapshots anonimizados. Cada registro tem `session_id` para distinguir sessões preservadas.
 5. **Limite de armazenamento** oferece 10, 25, 50 ou 100 MB; começa em 50 MB. Cada sessão encerra automaticamente após 8 horas ou quando atinge o limite. Registros são gravados progressivamente em armazenamento privado; sessões encerradas ficam disponíveis por até 7 dias ou até **Limpar dados de diagnóstico**.
 
-A captura detalhada fica desativada até o usuário iniciá-la. Snapshots guardam ordem, hierarquia, classe, ID, visibilidade e textos relevantes anonimizados do Uber Driver. Valores de nota, preço e medida fragmentados são mantidos somente quando os elementos próximos fornecem contexto. O conteúdo das árvores de outros apps nunca é lido ou salvo; eventos externos são resumidos por pacote/tipo e metadados da janela. Uma fila FIFO limitada substitui a troca indiscriminada pelo evento mais recente; estouros ficam registrados. Durante a análise são examinadas todas as janelas acessíveis do pacote Uber, com deduplicação separada por janela, sem remover as proteções atuais contra falsos positivos. Os candidatos rejeitados e mudanças relevantes de janela/conteúdo são preservados como registros append-only. A máquina de ofertas continua usando as regras existentes nesta entrega; esta instrumentação não comprova que a captura real de ofertas foi corrigida.
+A captura detalhada fica desativada até o usuário iniciá-la. Snapshots guardam ordem, hierarquia, classe, ID, visibilidade e textos relevantes anonimizados do Uber Driver. Valores de nota, preço e medida fragmentados são mantidos somente quando os elementos próximos fornecem contexto. O conteúdo das árvores de outros apps nunca é lido ou salvo; eventos externos são resumidos por pacote/tipo e metadados da janela. A fila é limitada a oito snapshots, coalesce o trabalho repetido da mesma janela e protege snapshots com sinais de oferta de eventos comuns do mapa. Uma subárvore capturada no callback não fica esperando para consultar a árvore viva depois. Parsing, máquina de estados e escrita do diagnóstico rodam na thread de análise.
+
+Com o monitoramento ativo, uma rotina consulta as janelas pertencentes ao pacote Uber mesmo antes de reconhecer a primeira oferta. Ela começa em 350 ms, recua para 1 s após uma leitura estável e para 1,5 s quando nenhuma janela Uber está acessível. Um evento novo ou sinal de oferta restaura a frequência rápida. O ciclo não acumula consultas simultâneas. Eventos capturam no callback um contexto limitado a 64 nós; o polling limita a leitura completa a 220 nós por janela e examina até três janelas Uber, começando pelas ativas/focadas. A maior árvore do diagnóstico anterior tinha 194 nós. Uma árvore truncada pode ser analisada para uma oferta presente, mas não serve sozinha para declarar seu desaparecimento. Rejeições de subárvores parciais de eventos também não encerram uma oferta.
+
+### Evidência da sessão de 27/11 e causa confirmada
+
+O arquivo `driver-assistant-diagnostic-20261127-session.json` contém 306 registros, 178 eventos de acessibilidade, 27 snapshots e 26 resultados do parser. Todas as 26 execuções indicaram `monitoring_enabled=true`; nenhuma foi aceita. As rejeições foram 15 por contexto de mapa, 10 por falta de ação/valor rotulado e 1 por mapa de oportunidades offline. Houve dois registros de estouro da fila; o atraso registrado chegou a 2.768 ms, a leitura da árvore a 1.083 ms e o processamento total a 3.629 ms. O usuário confirmou que duas ofertas reais foram exibidas durante a sessão; portanto, esses dados mostram que o app não as reconheceu, não que elas não existiram.
+
+Na implementação anterior, a fila guardava apenas metadados do evento. A thread de análise consultava a janela viva depois, podendo ler uma tela posterior; enquanto isso, eventos de conteúdo acumulavam e eram descartados. O polling também só começava depois de uma oferta já reconhecida. Esses dois gargalos estão confirmados no código e nos tempos do diagnóstico. Os IDs `ub_driver_offers_browse_*` e `ub__driver_job_offers_pill_*` apareceram visíveis em alguns snapshots e invisíveis em outros. Eles identificam a área de ofertas/oportunidades, mas não provam por si só que um cartão de corrida esteja presente; são usados apenas para preservar/priorizar a captura.
+
+As regras do `OfferParser` e os limites do semáforo não foram alterados. A validação no aparelho ainda precisa confirmar se o evento da oferta real expõe dados suficientes na subárvore capturada e se o polling de 220 nós termina rápido o bastante no Xiaomi. A coleta nova registra `snapshot_origin`, idade do evento na recepção, tempos monotônicos de captura/fila/leitura/parsing/escrita e o resultado de cada janela; isso permitirá localizar a etapa da próxima oferta sem gravar conteúdo de outros apps.
 
 O modo **Diagnóstico detalhado da estrutura acessível** nas configurações continua separado e desligado por padrão. Ele grava o resumo estrutural já existente; a sessão temporária acima registra os dados necessários para a investigação e exporta JSON.
 

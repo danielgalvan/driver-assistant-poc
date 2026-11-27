@@ -21,11 +21,55 @@ import java.util.Locale;
 /** Copies a bounded accessibility snapshot; callers must not persist node text or descriptions. */
 public final class AccessibilityTreeReader {
     private static final int MAX_NODES = 500;
+    private static final int MAX_EVENT_ANCESTORS = 8;
+    private static final String[] OFFER_STRUCTURE_IDS = {
+            "ub_driver_offers_browse_pill_container",
+            "ub_driver_offers_browse_offer_pill_view",
+            "ub__driver_job_offers_pill_title",
+            "ub__driver_job_offers_pill_badge"
+    };
 
     public List<AccessibilityNode> read(AccessibilityNodeInfo root) {
+        return read(root, MAX_NODES);
+    }
+
+    /** Copies at most {@code maxNodes}; the supplied root is consumed and recycled. */
+    public List<AccessibilityNode> read(AccessibilityNodeInfo root, int maxNodes) {
         List<AccessibilityNode> result = new ArrayList<>();
-        walk(root, -1, 0, result);
+        if (maxNodes > 0) walk(root, -1, 0, result, maxNodes);
+        else if (root != null) root.recycle();
         return result;
+    }
+
+    /**
+     * Captures a small immutable context around an event source before the live accessibility
+     * hierarchy can advance. The source itself remains owned by the caller.
+     */
+    public List<AccessibilityNode> readEventContext(AccessibilityNodeInfo source, int maxNodes) {
+        if (source == null || maxNodes <= 0) return List.of();
+        List<AccessibilityNodeInfo> ancestors = new ArrayList<>();
+        AccessibilityNodeInfo cursor = AccessibilityNodeInfo.obtain(source);
+        AccessibilityNodeInfo selected = null;
+        try {
+            for (int depth = 0; cursor != null && depth < MAX_EVENT_ANCESTORS; depth++) {
+                ancestors.add(cursor);
+                String id = cursor.getViewIdResourceName();
+                if (matchesOfferStructureId(id)) {
+                    selected = cursor;
+                    break;
+                }
+                AccessibilityNodeInfo parent = cursor.getParent();
+                cursor = parent;
+            }
+            if (selected == null && !ancestors.isEmpty()) {
+                // A few levels above a leaf usually includes neighboring fare/route fields while
+                // avoiding a full map root. The traversal remains capped by maxNodes.
+                selected = ancestors.get(Math.min(3, ancestors.size() - 1));
+            }
+            return selected == null ? List.of() : read(AccessibilityNodeInfo.obtain(selected), maxNodes);
+        } finally {
+            for (AccessibilityNodeInfo ancestor : ancestors) ancestor.recycle();
+        }
     }
 
     /** Structure-only diagnostic summary. It intentionally omits all accessible strings. */
@@ -115,6 +159,41 @@ public final class AccessibilityTreeReader {
         return money && offerCue;
     }
 
+    /** Structural clue for queue priority only; it is not proof that a ride request exists. */
+    public static boolean containsOfferStructureSignal(List<AccessibilityNode> nodes) {
+        if (nodes == null) return false;
+        for (AccessibilityNode node : nodes) {
+            if (node != null && node.visibleToUser() && matchesOfferStructureId(node.resourceId())) return true;
+        }
+        return false;
+    }
+
+    /** Fast in-memory fingerprint; the raw string is never written to diagnostics. */
+    public static String contentFingerprint(List<AccessibilityNode> nodes) {
+        StringBuilder value = new StringBuilder();
+        if (nodes != null) for (AccessibilityNode node : nodes) {
+            if (node == null) continue;
+            value.append(node.order()).append('|').append(node.parentOrder()).append('|')
+                    .append(node.resourceId()).append('|').append(node.className()).append('|')
+                    .append(node.visibleToUser()).append('|').append(node.accessibleText()).append('\n');
+        }
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(value.toString().getBytes(StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder(digest.length * 2);
+            for (byte item : digest) hex.append(String.format(Locale.ROOT, "%02x", item));
+            return hex.toString();
+        } catch (NoSuchAlgorithmException impossible) {
+            return Integer.toHexString(value.toString().hashCode()) + ':' + value.length();
+        }
+    }
+
+    private static boolean matchesOfferStructureId(String id) {
+        if (id == null) return false;
+        for (String expected : OFFER_STRUCTURE_IDS) if (id.endsWith(expected)) return true;
+        return false;
+    }
+
     /** Broad signal for preserving a changed tree during capture; it does not affect parser acceptance. */
     public static boolean containsRelevantDiagnosticText(List<AccessibilityNode> nodes) {
         if (nodes == null) return false;
@@ -175,18 +254,22 @@ public final class AccessibilityTreeReader {
     }
 
     private static void walk(AccessibilityNodeInfo node, int parentOrder, int depth,
-                             List<AccessibilityNode> output) {
-        if (node == null || output.size() >= MAX_NODES) return;
+                             List<AccessibilityNode> output, int maxNodes) {
+        if (node == null || output.size() >= maxNodes) return;
         int order = output.size();
         try {
             CharSequence text = node.getText();
             CharSequence description = node.getContentDescription();
+            CharSequence className = node.getClassName();
+            boolean visible = node.isVisibleToUser();
             output.add(new AccessibilityNode(toString(text), toString(description),
-                    node.getViewIdResourceName(), node.getClassName() == null ? null : node.getClassName().toString(),
-                    parentOrder, depth, order, node.isVisibleToUser()));
-            for (int index = 0; index < node.getChildCount() && output.size() < MAX_NODES; index++) {
+                    node.getViewIdResourceName(), className == null ? null : className.toString(),
+                    parentOrder, depth, order, visible));
+            if (!visible) return;
+            int childCount = node.getChildCount();
+            for (int index = 0; index < childCount && output.size() < maxNodes; index++) {
                 AccessibilityNodeInfo child = node.getChild(index);
-                walk(child, order, depth + 1, output);
+                walk(child, order, depth + 1, output, maxNodes);
             }
         } finally {
             node.recycle();

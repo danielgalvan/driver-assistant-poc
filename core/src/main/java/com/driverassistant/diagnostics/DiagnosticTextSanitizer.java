@@ -22,10 +22,11 @@ public final class DiagnosticTextSanitizer {
             "(?i)(?<![\\p{L}\\p{N}])(?:uber\\s*x|uberx|uber\\s*(?:black|comfort|flash|moto|taxi)|comfort|black|priority|flash|moto|taxi)(?![\\p{L}\\p{N}])");
     private static final String[] SAFE_ACCESSIBILITY_FRAGMENTS = {
             "r$", "brl", "km", "m", "min", "mins", "minuto", "minutos", "h", "hora", "horas",
-            "uber", "x", "oferta", "corrida", "aceitar", "selecionar", "recusar", "nota", "estrela", "estrelas"
+            "uber", "x", "oferta", "ofertas", "ver ofertas", "corrida", "corridas", "aceitar",
+            "selecionar", "recusar", "nota", "estrela", "estrelas", "oportunidades", "ficar online"
     };
     private static final Pattern RELEVANT = Pattern.compile(
-            "(?i)(?:R\\$|\\bBRL\\b|[0-9][0-9.,]*\\s*(?:km|quil[oô]metros?|m|metros?|min(?:utos?)?|h(?:oras?)?)\\b|[★⭐]|\\b(?:aceitar|selecionar|recusar|expirada|expirou|oferta|corrida|uberx|comfort|black|priority|flash|moto|taxi|nota|avalia[cç][aã]o|rating|passageiro|embarque|retirada|destino|viagem|bonus|b[oô]nus|pre[cç]o din[aâ]mico|multiplicador|ficar online|oportunidades|mapa|saldo|carteira|hist[oó]rico)\\b)");
+            "(?i)(?:R\\$|\\bBRL\\b|[0-9][0-9.,]*\\s*(?:km|quil[oô]metros?|m|metros?|min(?:utos?)?|h(?:oras?)?)\\b|[★⭐]|\\b(?:aceitar|selecionar|recusar|expirada|expirou|ofertas?|corridas?|uberx|comfort|black|priority|flash|moto|taxi|nota|avalia[cç][aã]o|rating|passageiro|embarque|retirada|destino|viagem|bonus|b[oô]nus|pre[cç]o din[aâ]mico|multiplicador|ficar online|oportunidades|mapa|saldo|carteira|hist[oó]rico)\\b)");
     private static final String[] SAFE_NAME_PHRASES = {
             "uberx", "uber x", "uber black", "uber comfort", "uber flash", "uber moto", "uber taxi", "uber pool",
             "comfort", "black", "priority", "flash", "moto", "taxi", "uber driver", "rota pro"
@@ -62,6 +63,7 @@ public final class DiagnosticTextSanitizer {
                 || SAFE_CATEGORY_PHRASE.matcher(normalized).matches())) return sanitized;
 
         if (NUMBER_FRAGMENT.matcher(sanitized).matches()) {
+            if (sanitized.length() <= 3 && context.contains("ub__driver_job_offers_pill_badge")) return sanitized;
             if (RATING_FRAGMENT.matcher(sanitized).matches()
                     && containsAny(context, "nota", "avaliação", "avaliacao", "rating", "estrela", "★", "⭐")) {
                 return sanitized;
