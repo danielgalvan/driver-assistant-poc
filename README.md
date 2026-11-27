@@ -50,7 +50,35 @@ As configurações usam `SharedPreferences`; o diagnóstico detalhado usa um arq
 - Android nativo com layouts XML e Material Components
 - Android Gradle Plugin 9.5.0 e Gradle Wrapper 9.6.0
 - `compileSdk 37`, `minSdk 29` (Android 10) e `targetSdk 36`
+- Google ML Kit Text Recognition `16.0.1`, modelo latino embarcado para OCR local
 - JUnit 4 para testes locais do módulo `core`
+
+## Captura visual experimental
+
+A captura visual é opcional, vem desligada por padrão e só é habilitada quando o usuário escolhe uma estratégia em **Configurações → Estratégia de captura de ofertas**. A permissão continua limitada ao `AccessibilityService` explicitamente ativado pelo usuário. O screenshot é processado em memória; nem a imagem bruta nem o texto OCR sem sanitização são persistidos. O OCR usa o modelo latino embarcado do ML Kit, funciona offline após a instalação e não adiciona permissão de internet.
+
+O fluxo separa as fontes em `app/.../capture` e as regras independentes do Android em `core/.../capture`: o detector agrupa linhas por proximidade relativa e evidências visuais; cada região candidata ainda passa pelo `OfferParser` estrito existente. Bônus e preços dinâmicos isolados não viram oferta. Quando as duas fontes estão ativas, só são combinadas se a identidade da oferta for compatível; divergências são registradas e não geram cartão. A máquina de estados e o `OverlayController` existentes continuam responsáveis por ciclo de vida e apresentação.
+
+| Estratégia | Comportamento |
+|---|---|
+| Somente acessibilidade | Mantém o fluxo atual e não captura screenshots; é o padrão seguro. |
+| Somente OCR | Usa eventos de janela Uber para disparar captura e extrai a oferta pela imagem. |
+| Híbrido | Prioriza acessibilidade e tenta OCR quando a captura estrutural não é aceita. |
+| Diagnóstico comparativo | Executa acessibilidade e OCR em paralelo lógico, registra tempos, campos e divergências sem criar cartões duplicados. |
+
+As chamadas são assíncronas, serializadas e limitadas a uma captura a cada 700 ms; resultados com mais de 2,5 s ou de outra janela são descartados. A instância do reconhecedor é reutilizada e bitmaps são descartados após o OCR.
+
+| Android | Captura usada | Limitação e proteção |
+|---|---|---|
+| API 29 | Sem screenshot; acessibilidade continua disponível. | O Android não oferece as APIs oficiais usadas por esta POC. |
+| API 30–33 | `takeScreenshot()` da tela e recorte pelas bounds da janela Uber. | Exige Uber em primeiro plano. Se uma janela acessível externa intersectar a Uber, a imagem é descartada por segurança. |
+| API 34+ | `takeScreenshotOfWindow()` para a janela Uber. | Requer a janela acessível Uber e pode falhar em janelas `FLAG_SECURE`, indisponíveis ou sob limite de frequência do Android. |
+
+O OCR reconhece somente o idioma latino configurado; erros de leitura, ofertas fora do padrão visual e alterações futuras no layout da Uber podem reduzir a detecção. O modo OCR não relaxa as regras de validação do parser. A coexistência com Rota Pro/GigU e a captura de ofertas reais ainda precisam de validação no aparelho físico; não se presume um layout real nem se declara a captura confirmada antes desse teste.
+
+Dependência adicionada: `com.google.mlkit:text-recognition:16.0.1`, distribuída sob os [Termos de Serviço do Google ML Kit](https://developers.google.com/ml-kit/terms). O modelo é empacotado no app. O APK universal debug desta revisão tem 59.100.493 bytes (56,36 MiB), contra 13.968.966 bytes (13,32 MiB) no APK debug anterior: aumento de aproximadamente 45,13 MB (43,04 MiB). A inspeção do APK atribui cerca de 39,14 MiB às bibliotecas nativas de OCR de quatro ABIs e 1,22 MiB aos assets comprimidos do modelo; o restante inclui mudanças de código e dependências do projeto. O APK universal mantém as bibliotecas de `arm64-v8a`, `armeabi-v7a`, `x86` e `x86_64`, então esse artefato de debug não reduz o download ao ABI do aparelho.
+
+Referências oficiais: [ML Kit Text Recognition v2 para Android](https://developers.google.com/ml-kit/vision/text-recognition/v2/android), [AccessibilityService.takeScreenshot](https://developer.android.com/reference/android/accessibilityservice/AccessibilityService#takeScreenshot(int,java.util.concurrent.Executor,android.accessibilityservice.AccessibilityService.TakeScreenshotCallback)) e [AccessibilityService.takeScreenshotOfWindow](https://developer.android.com/reference/android/accessibilityservice/AccessibilityService#takeScreenshotOfWindow(int,java.util.concurrent.Executor,android.accessibilityservice.AccessibilityService.TakeScreenshotCallback)).
 
 ## Pré-requisitos
 

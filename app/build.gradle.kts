@@ -30,6 +30,8 @@ dependencies {
     implementation(project(":core"))
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("com.google.android.material:material:1.13.0")
+    // Bundled Latin model: available immediately after install and fully offline.
+    implementation("com.google.mlkit:text-recognition:16.0.1")
 
     testImplementation("junit:junit:4.13.2")
 }

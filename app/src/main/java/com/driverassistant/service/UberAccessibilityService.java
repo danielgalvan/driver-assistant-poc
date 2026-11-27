@@ -5,12 +5,20 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.graphics.Bitmap;
 import android.graphics.Rect;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
 
 import com.driverassistant.accessibility.AccessibilityTreeReader;
+import com.driverassistant.capture.AccessibilityOfferCaptureSource;
+import com.driverassistant.capture.CaptureResultPolicy;
+import com.driverassistant.capture.OfferCaptureCoordinator;
+import com.driverassistant.capture.OfferCaptureStrategy;
+import com.driverassistant.capture.OcrTextRecognizer;
+import com.driverassistant.capture.ScreenshotOfferCaptureSource;
+import com.driverassistant.capture.VisualOfferDetector;
 import com.driverassistant.calculator.ClassificationService;
 import com.driverassistant.calculator.ProfitabilityCalculator;
 import com.driverassistant.config.ConfigRepository;
@@ -39,6 +47,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /** Reads accessible content only from Uber Driver; foreign events are reduced to metadata. */
 public final class UberAccessibilityService extends AccessibilityService {
@@ -62,12 +71,19 @@ public final class UberAccessibilityService extends AccessibilityService {
     };
     private final OfferParser parser = new OfferParser();
     private final AccessibilityTreeReader treeReader = new AccessibilityTreeReader();
+    private final OfferCaptureCoordinator captureCoordinator = new OfferCaptureCoordinator();
+    private final VisualOfferDetector visualOfferDetector = new VisualOfferDetector();
+    private final AtomicLong visualCaptureGeneration = new AtomicLong();
+    private final AtomicLong visualCaptureSequence = new AtomicLong();
     private final ProfitabilityCalculator calculator = new ProfitabilityCalculator();
     private final ClassificationService classificationService = new ClassificationService();
     private ConfigRepository config;
     private DiagnosticCaptureStore captureStore;
     private OverlayController overlay;
     private OfferLifecycleMachine lifecycle;
+    private AccessibilityOfferCaptureSource accessibilityCaptureSource;
+    private ScreenshotOfferCaptureSource screenshotCaptureSource;
+    private OcrTextRecognizer ocrTextRecognizer;
     private HandlerThread analysisThread;
     private Handler analysisHandler;
     private volatile TripOffer activeOfferSnapshot;
@@ -86,6 +102,9 @@ public final class UberAccessibilityService extends AccessibilityService {
     private String lastParserDiagnosticFingerprint;
     private long lastParserDiagnosticAt;
     private String lastLifecycleDiagnosticFingerprint;
+    private String lastVisualSuppressionReason;
+    private long lastVisualSuppressionAt;
+    private int suppressedVisualRequests;
 
     private static final class EventRequest {
         final int eventType;
@@ -218,6 +237,8 @@ public final class UberAccessibilityService extends AccessibilityService {
         }
         if (!enabled) {
             service.stopForegroundWatch();
+            service.visualCaptureGeneration.incrementAndGet();
+            if (service.screenshotCaptureSource != null) service.screenshotCaptureSource.cancelPending();
             service.disableLifecycle("monitoring_disabled");
             if (service.overlay != null) service.overlay.hide("monitoring_disabled");
         } else {
@@ -227,15 +248,20 @@ public final class UberAccessibilityService extends AccessibilityService {
 
     public static void refreshOverlayConfiguration() {
         UberAccessibilityService service = activeService;
-        if (service == null || service.overlay == null || service.config == null) return;
+        if (service == null || service.config == null) return;
         if (service.captureStore != null && service.captureStore.isActive()) {
             service.captureStore.record("MODE_STATE", DiagnosticCaptureStore.object(
                     "reason", "overlay_configuration_changed",
                     "monitoring_enabled", service.config.monitoringEnabled(),
                     "overlay_configured", service.config.overlayEnabled()));
         }
-        service.overlay.hide("overlay_configuration_changed");
-        if (service.config.overlayEnabled()) service.restoreRealOffer();
+        service.visualCaptureGeneration.incrementAndGet();
+        if (service.screenshotCaptureSource != null) service.screenshotCaptureSource.cancelPending();
+        if (service.overlay != null) {
+            service.overlay.hide("overlay_configuration_changed");
+            if (service.config.overlayEnabled()) service.restoreRealOffer();
+        }
+        if (service.config.monitoringEnabled()) service.requestForegroundPollSoon();
     }
 
     /** Simulations use the same Android overlay but never touch real offer lifecycle counters. */
@@ -260,6 +286,7 @@ public final class UberAccessibilityService extends AccessibilityService {
         overlay = new OverlayController(this);
         if (lifecycle == null) lifecycle = new OfferLifecycleMachine(config.offerDisappearanceToleranceMillis());
         startAnalysisThread();
+        ensureCaptureSources();
         analysisHandler.post(() -> DiagnosticLogStore.record(this, "DA_ACCESSIBILITY",
                 "SERVICE_CONNECTED", "target=uber_driver"));
         if (config.monitoringEnabled()) startForegroundWatch();
@@ -274,6 +301,8 @@ public final class UberAccessibilityService extends AccessibilityService {
         int windowId = event.getWindowId();
         int contentChangeTypes = event.getContentChangeTypes();
         long eventTimeUptimeMillis = event.getEventTime();
+        long eventAgeAtReceipt = eventTimeUptimeMillis <= 0 ? -1
+                : Math.max(0, SystemClock.uptimeMillis() - eventTimeUptimeMillis);
         String eventPackage = event.getPackageName() == null ? "unknown" : event.getPackageName().toString();
         boolean uberEvent = UBER_PACKAGE.equals(eventPackage);
         if (!uberEvent) {
@@ -290,6 +319,21 @@ public final class UberAccessibilityService extends AccessibilityService {
                 disableLifecycleOnAnalysis("monitoring_disabled");
             });
             if (overlay != null) overlay.hide("monitoring_disabled");
+            return;
+        }
+
+        if (config.offerCaptureStrategy() == OfferCaptureStrategy.OCR_ONLY) {
+            EventRequest metadataOnly = new EventRequest(eventType, receivedAt, receivedAt, receivedAt,
+                    eventTimeUptimeMillis, eventAgeAtReceipt, false, false, false,
+                    "ocr_only_event_trigger", UBER_PACKAGE, safeClass(event.getClassName()),
+                    "accessibility_content_not_read_in_ocr_only_mode", windowId, -1, -1,
+                    false, false, contentChangeTypes, List.of());
+            if (captureStore.isActive()) recordEventCapture(metadataOnly, "visual_trigger_only");
+            if (monitoringEnabled) {
+                foregroundPollPolicy.signalActivity();
+                requestVisualCapture(windowId, "accessibility_event", null, false, receivedAt);
+                requestForegroundPollSoon();
+            }
             return;
         }
 
@@ -314,8 +358,6 @@ public final class UberAccessibilityService extends AccessibilityService {
             if (source != null) source.recycle();
         }
         long captureFinishedAt = SystemClock.elapsedRealtime();
-        long eventAgeAtReceipt = eventTimeUptimeMillis <= 0 ? -1
-                : Math.max(0, SystemClock.uptimeMillis() - eventTimeUptimeMillis);
         EventRequest request = new EventRequest(eventType, receivedAt, captureStartedAt, captureFinishedAt,
                 eventTimeUptimeMillis, eventAgeAtReceipt, false, false,
                 snapshot.size() >= MAX_EVENT_CONTEXT_NODES, "event_subtree",
@@ -433,9 +475,16 @@ public final class UberAccessibilityService extends AccessibilityService {
                 request.foregroundPoll ? "source=" + source : "type=" + eventType);
         boolean captureActive = captureStore != null && captureStore.isActive();
         boolean monitoringEnabled = config.monitoringEnabled();
+        OfferCaptureStrategy strategy = config.offerCaptureStrategy();
         if (!monitoringEnabled && !captureActive) {
             disableLifecycleOnAnalysis("monitoring_disabled");
             hideOverlay("monitoring_disabled");
+            return null;
+        }
+        if (strategy == OfferCaptureStrategy.OCR_ONLY) {
+            if (monitoringEnabled && !request.foregroundPoll) {
+                requestVisualCapture(request.windowId, "accessibility_event", null, false, startedAt);
+            }
             return null;
         }
         long queueMillis = Math.max(0, workerStartedAt - request.captureFinishedAt);
@@ -443,6 +492,10 @@ public final class UberAccessibilityService extends AccessibilityService {
         if (request.snapshot.isEmpty()) {
             if (captureActive) captureStore.recordSnapshotSkipped(request.startedAt,
                     request.sourceCaptureError == null ? "event_source_unavailable_no_text" : "event_source_error");
+            if (monitoringEnabled && !request.foregroundPoll
+                    && strategy.usesVisualCapture()) {
+                requestVisualCapture(request.windowId, "empty_accessibility_snapshot", null, false, startedAt);
+            }
             return null;
         }
 
@@ -454,6 +507,11 @@ public final class UberAccessibilityService extends AccessibilityService {
         }
         if (fingerprint.equals(previousFingerprint)) {
             if (captureActive) captureStore.recordSnapshotSkipped(request.startedAt, "duplicate_immutable_snapshot");
+            if (monitoringEnabled && !request.foregroundPoll
+                    && (strategy == OfferCaptureStrategy.COMPARATIVE
+                    || strategy == OfferCaptureStrategy.HYBRID && request.isWindowTransition())) {
+                requestVisualCapture(request.windowId, "relevant_window_event", null, false, startedAt);
+            }
             return null;
         }
 
@@ -483,6 +541,17 @@ public final class UberAccessibilityService extends AccessibilityService {
             else if (applyLifecycle && request.authoritativeWindowSnapshot && result != null) {
                 processMissing(result.rejectionReason(), startedAt);
             }
+            boolean structuralEvidence = AccessibilityTreeReader.containsOfferStructureSignal(request.snapshot)
+                    || AccessibilityTreeReader.containsRelevantDiagnosticText(request.snapshot);
+            boolean relevantChange = !request.foregroundPoll
+                    && (request.isWindowTransition() || request.isTextOrContentChange() || !request.snapshot.isEmpty());
+            if (monitoringEnabled && applyLifecycle
+                    && captureCoordinator.shouldRequestVisual(strategy, result != null && result.accepted(),
+                    relevantChange, structuralEvidence)) {
+                requestVisualCapture(request.windowId, result != null && result.accepted()
+                        ? "comparative_accessibility_result" : "accessibility_fallback",
+                        result, request.authoritativeWindowSnapshot, startedAt);
+            }
             return result;
         } catch (RuntimeException exception) {
             DiagnosticLogStore.record(this, "DA_ACCESSIBILITY", "PROCESSING_ERROR",
@@ -497,6 +566,8 @@ public final class UberAccessibilityService extends AccessibilityService {
     @Override
     public void onInterrupt() {
         paused = true;
+        visualCaptureGeneration.incrementAndGet();
+        if (screenshotCaptureSource != null) screenshotCaptureSource.cancelPending();
         stopForegroundWatch();
         pendingSnapshots.clear();
         disableLifecycle("service_interrupted");
@@ -508,6 +579,9 @@ public final class UberAccessibilityService extends AccessibilityService {
     @Override
     public void onDestroy() {
         shuttingDown = true;
+        visualCaptureGeneration.incrementAndGet();
+        if (screenshotCaptureSource != null) screenshotCaptureSource.close();
+        if (ocrTextRecognizer != null) ocrTextRecognizer.close();
         stopForegroundWatch();
         pendingSnapshots.clear();
         disableLifecycle("service_disconnected");
@@ -526,6 +600,7 @@ public final class UberAccessibilityService extends AccessibilityService {
         if (lifecycle == null) lifecycle = new OfferLifecycleMachine(config.offerDisappearanceToleranceMillis());
         if (overlay == null) overlay = new OverlayController(this);
         startAnalysisThread();
+        ensureCaptureSources();
     }
 
     private void startAnalysisThread() {
@@ -533,6 +608,242 @@ public final class UberAccessibilityService extends AccessibilityService {
         analysisThread = new HandlerThread("driver-offer-analysis");
         analysisThread.start();
         analysisHandler = new Handler(analysisThread.getLooper());
+    }
+
+    private void ensureCaptureSources() {
+        if (accessibilityCaptureSource == null) accessibilityCaptureSource = new AccessibilityOfferCaptureSource(parser);
+        if (screenshotCaptureSource == null) {
+            screenshotCaptureSource = new ScreenshotOfferCaptureSource(this, UBER_PACKAGE, command -> {
+                Handler handler = analysisHandler;
+                if (handler == null || !handler.post(command)) mainHandler.post(command);
+            });
+        }
+    }
+
+    private void requestVisualCapture(int windowId, String trigger, OfferParseResult accessibilityResult,
+                                      boolean authoritative, long sourceStartedAt) {
+        Handler handler = analysisHandler;
+        if (handler == null) return;
+        Runnable request = () -> requestVisualCaptureOnAnalysis(windowId, trigger, accessibilityResult,
+                authoritative, sourceStartedAt);
+        if (Looper.myLooper() == handler.getLooper()) request.run();
+        else handler.post(request);
+    }
+
+    private void requestVisualCaptureOnAnalysis(int windowId, String trigger, OfferParseResult accessibilityResult,
+                                                boolean authoritative, long sourceStartedAt) {
+        if (paused || shuttingDown || !connected || config == null || !config.monitoringEnabled()) return;
+        OfferCaptureStrategy strategy = config.offerCaptureStrategy();
+        boolean accessibilityAccepted = accessibilityResult != null && accessibilityResult.accepted();
+        if (!captureCoordinator.shouldRequestVisual(strategy, accessibilityAccepted, true, true)) return;
+        ensureCaptureSources();
+        if (ocrTextRecognizer == null) {
+            try {
+                ocrTextRecognizer = new OcrTextRecognizer();
+            } catch (RuntimeException exception) {
+                recordVisualCaptureFailure("recognizer_init_" + exception.getClass().getSimpleName(),
+                        windowId, trigger, strategy);
+                return;
+            }
+        }
+        long requestId = visualCaptureSequence.incrementAndGet();
+        long generation = visualCaptureGeneration.get();
+        long requestedAt = SystemClock.elapsedRealtime();
+        recordVisualEvent("OCR_CAPTURE_REQUESTED", DiagnosticCaptureStore.object(
+                "capture_id", requestId, "trigger", trigger, "strategy", strategy.name(),
+                "window_id", windowId, "requested_elapsed_ms", requestedAt,
+                "accessibility_accepted", accessibilityAccepted,
+                "accessibility_rejection", accessibilityResult == null ? null : accessibilityResult.rejectionReason(),
+                "overlay_configured", config.overlayEnabled()));
+        screenshotCaptureSource.capture(windowId, trigger, capture -> {
+            if (!capture.succeeded()) {
+                recordVisualCaptureFailure(capture.failureReason, windowId, trigger, strategy);
+                return;
+            }
+            long capturedAt = SystemClock.elapsedRealtime();
+            recordVisualEvent("OCR_SCREENSHOT_CAPTURED", DiagnosticCaptureStore.object(
+                    "capture_id", requestId, "trigger", trigger, "window_id", windowId,
+                    "capture_api", capture.windowSpecific ? "window" : "display_cropped_to_uber",
+                    "capture_ms", capture.captureMillis, "image_width", capture.bitmap.getWidth(),
+                    "image_height", capture.bitmap.getHeight(),
+                    "foreign_window_metadata_count", capture.foreignWindowCount,
+                    "captured_elapsed_ms", capturedAt));
+            if (!isCurrentVisualRequest(generation, requestedAt, windowId, capture.windowSpecific)) {
+                capture.bitmap.recycle();
+                recordVisualEvent("OCR_RESULT_DISCARDED", DiagnosticCaptureStore.object(
+                        "capture_id", requestId, "reason", "capture_invalidated_before_ocr"));
+                return;
+            }
+            Bitmap bitmap = capture.bitmap;
+            long imageCapturedAt = capturedAt;
+            ocrTextRecognizer.process(bitmap, command -> {
+                Handler callbackHandler = analysisHandler;
+                if (callbackHandler == null || !callbackHandler.post(command)) mainHandler.post(command);
+            }, new OcrTextRecognizer.Callback() {
+                @Override public void onSuccess(OcrTextRecognizer.Recognition recognition) {
+                    try {
+                        processVisualRecognition(requestId, trigger, strategy, capture, recognition,
+                                accessibilityResult, authoritative, sourceStartedAt, requestedAt,
+                                imageCapturedAt, generation);
+                    } finally {
+                        if (!bitmap.isRecycled()) bitmap.recycle();
+                    }
+                }
+
+                @Override public void onFailure(String reason, long processingMillis) {
+                    try {
+                        recordVisualEvent("OCR_RECOGNITION_FAILED", DiagnosticCaptureStore.object(
+                                "capture_id", requestId, "reason", safeReason(reason),
+                                "capture_ms", capture.captureMillis, "processing_ms", processingMillis,
+                                "total_ms", Math.max(0, SystemClock.elapsedRealtime() - requestedAt)));
+                        DiagnosticLogStore.record(UberAccessibilityService.this, "DA_OCR", "OCR_FAILED",
+                                "reason=" + safeReason(reason) + "; processing_ms=" + processingMillis);
+                    } finally {
+                        if (!bitmap.isRecycled()) bitmap.recycle();
+                    }
+                }
+            });
+        });
+    }
+
+    private boolean isCurrentVisualRequest(long generation, long requestedAt, int windowId, boolean windowSpecific) {
+        return CaptureResultPolicy.mayApply(generation, visualCaptureGeneration.get(), requestedAt,
+                SystemClock.elapsedRealtime(), config != null && config.monitoringEnabled())
+                && !paused && !shuttingDown && connected
+                && screenshotCaptureSource != null && screenshotCaptureSource.stillValid(windowId, windowSpecific);
+    }
+
+    private void processVisualRecognition(long requestId, String trigger, OfferCaptureStrategy strategy,
+                                          ScreenshotOfferCaptureSource.Capture capture,
+                                          OcrTextRecognizer.Recognition recognition,
+                                          OfferParseResult accessibilityResult, boolean authoritative,
+                                          long sourceStartedAt, long requestedAt, long capturedAt,
+                                          long generation) {
+        long now = SystemClock.elapsedRealtime();
+        if (!isCurrentVisualRequest(generation, requestedAt, capture.windowId, capture.windowSpecific)) {
+            recordVisualEvent("OCR_RESULT_DISCARDED", DiagnosticCaptureStore.object(
+                    "capture_id", requestId, "reason", "stale_or_uber_window_changed",
+                    "capture_to_result_ms", Math.max(0, now - capturedAt),
+                    "ocr_processing_ms", recognition.processingMillis()));
+            return;
+        }
+
+        recordVisualEvent("OCR_RECOGNITION", DiagnosticCaptureStore.object(
+                "capture_id", requestId, "window_id", capture.windowId,
+                "image_width", recognition.imageWidth(), "image_height", recognition.imageHeight(),
+                "block_count", recognition.blocks().size(), "line_count", recognition.lines().size(),
+                "capture_ms", capture.captureMillis, "processing_ms", recognition.processingMillis(),
+                "recognized_text", recognition.toSanitizedJson()));
+
+        VisualOfferDetector.Detection detection = visualOfferDetector.detect(
+                recognition.lines(), recognition.imageWidth(), recognition.imageHeight());
+        JSONArray regions = new JSONArray();
+        OfferParseResult ocrResult = null;
+        VisualOfferDetector.Region parsedRegion = null;
+        String ocrRejection = detection.rejectionReason();
+        for (VisualOfferDetector.Region region : detection.regions()) {
+            regions.put(visualRegionDiagnostic(region));
+            if (!region.offerLike()) continue;
+            OfferParseResult candidate = accessibilityCaptureSource.parse(region.toParserNodes(),
+                    captureStore != null && captureStore.isActive());
+            if (candidate.accepted()) {
+                ocrResult = candidate;
+                parsedRegion = region;
+                ocrRejection = null;
+                break;
+            }
+            ocrResult = candidate;
+            parsedRegion = region;
+            ocrRejection = candidate.rejectionReason();
+        }
+        recordVisualEvent("OCR_OFFER_DETECTION", DiagnosticCaptureStore.object(
+                "capture_id", requestId, "candidate_found", ocrResult != null && ocrResult.accepted(),
+                "candidate_region_count", detection.regions().stream().filter(VisualOfferDetector.Region::offerLike).count(),
+                "regions", regions, "rejection_reason", ocrRejection,
+                "parser_validation_trace", ocrResult == null ? new JSONArray()
+                        : DiagnosticCaptureStore.array(ocrResult.diagnosticTrace()),
+                "found_fields", ocrResult == null ? new JSONArray() : DiagnosticCaptureStore.array(ocrResult.foundFields()),
+                "unavailable_fields", ocrResult == null ? new JSONArray() : DiagnosticCaptureStore.array(ocrResult.unavailableFields()),
+                "selected_region_bounds", parsedRegion == null ? null : DiagnosticCaptureStore.array(
+                        List.of(parsedRegion.bounds().left(), parsedRegion.bounds().top(),
+                                parsedRegion.bounds().right(), parsedRegion.bounds().bottom()))));
+
+        TripOffer accessibilityOffer = accessibilityResult != null && accessibilityResult.accepted()
+                ? accessibilityResult.offer() : null;
+        TripOffer ocrOffer = ocrResult != null && ocrResult.accepted() ? ocrResult.offer() : null;
+        OfferCaptureCoordinator.Reconciliation reconciliation = strategy == OfferCaptureStrategy.COMPARATIVE
+                ? captureCoordinator.reconcile(accessibilityOffer, ocrOffer)
+                : captureCoordinator.reconcile(null, ocrOffer);
+        JSONArray fieldOrigins = new JSONArray();
+        for (Map.Entry<TripOffer.Field, String> entry : reconciliation.fieldOrigins().entrySet()) {
+            fieldOrigins.put(DiagnosticCaptureStore.object("field", entry.getKey().name(), "source", entry.getValue()));
+        }
+        boolean divergent = reconciliation.status() == OfferCaptureCoordinator.Status.DIVERGENT;
+        recordVisualEvent(divergent ? "OFFER_SOURCE_DIVERGENCE" : "OFFER_CAPTURE_COMPARISON",
+                DiagnosticCaptureStore.object("capture_id", requestId, "strategy", strategy.name(),
+                        "accessibility_accepted", accessibilityOffer != null,
+                        "accessibility_rejection", accessibilityResult == null ? null : accessibilityResult.rejectionReason(),
+                        "ocr_accepted", ocrOffer != null, "ocr_rejection", ocrRejection,
+                        "reconciliation", reconciliation.status().name(), "field_origins", fieldOrigins,
+                        "capture_ms", capture.captureMillis, "ocr_ms", recognition.processingMillis(),
+                        "total_ms", Math.max(0, now - requestedAt),
+                        "offer_to_result_ms", Math.max(0, now - sourceStartedAt)));
+
+        DiagnosticLogStore.record(this, "DA_OCR", "CAPTURE_COMPARED",
+                "strategy=" + strategy.name() + "; candidate=" + (ocrOffer != null)
+                        + "; status=" + reconciliation.status().name()
+                        + "; capture_ms=" + capture.captureMillis
+                        + "; ocr_ms=" + recognition.processingMillis());
+
+        TripOffer selected = reconciliation.offer();
+        if (selected != null && !divergent) {
+            applyOffer(selected, sourceStartedAt, strategy == OfferCaptureStrategy.COMPARATIVE
+                    && accessibilityOffer != null ? "screenshot_ocr_merged" : "screenshot_ocr");
+        } else if (authoritative && accessibilityOffer == null) {
+            processMissing("ocr_" + (ocrRejection == null ? "offer_unconfirmed" : safeReason(ocrRejection)), sourceStartedAt);
+        }
+        recordVisualEvent("OCR_PROCESSING_COMPLETE", DiagnosticCaptureStore.object(
+                "capture_id", requestId, "capture_ms", capture.captureMillis,
+                "ocr_ms", recognition.processingMillis(), "total_ms", Math.max(0, now - requestedAt),
+                "overlay_visible", overlay != null && overlay.isVisible(),
+                "overlay_requested", selected != null));
+    }
+
+    private static JSONObject visualRegionDiagnostic(VisualOfferDetector.Region region) {
+        VisualOfferDetector.Evidence evidence = region.evidence();
+        return DiagnosticCaptureStore.object("bounds", DiagnosticCaptureStore.array(List.of(
+                        region.bounds().left(), region.bounds().top(), region.bounds().right(), region.bounds().bottom())),
+                "line_count", region.lines().size(), "offer_like", region.offerLike(), "score", evidence.score(),
+                "money_candidates", evidence.moneyCandidates(), "acceptance_actions", evidence.acceptanceActions(),
+                "labeled_offers", evidence.labeledOffers(), "categories", evidence.categories(),
+                "rating_cues", evidence.ratingCues(), "distances", evidence.distances(), "durations", evidence.durations());
+    }
+
+    private void recordVisualCaptureFailure(String reason, int windowId, String trigger,
+                                            OfferCaptureStrategy strategy) {
+        long now = SystemClock.elapsedRealtime();
+        boolean rateLimited = "rate_limited".equals(reason) || "capture_already_in_flight".equals(reason);
+        if (rateLimited) {
+            suppressedVisualRequests++;
+            if (reason.equals(lastVisualSuppressionReason) && now - lastVisualSuppressionAt < 5_000) return;
+            int suppressed = suppressedVisualRequests;
+            suppressedVisualRequests = 0;
+            lastVisualSuppressionReason = reason;
+            lastVisualSuppressionAt = now;
+            recordVisualEvent("OCR_CAPTURE_SUPPRESSED", DiagnosticCaptureStore.object(
+                    "reason", reason, "suppressed_requests", suppressed, "window_id", windowId,
+                    "trigger", trigger, "strategy", strategy.name()));
+            return;
+        }
+        recordVisualEvent("OCR_CAPTURE_FAILED", DiagnosticCaptureStore.object(
+                "reason", safeReason(reason), "window_id", windowId,
+                "trigger", trigger, "strategy", strategy.name()));
+        DiagnosticLogStore.record(this, "DA_OCR", "CAPTURE_FAILED",
+                "reason=" + safeReason(reason) + "; strategy=" + strategy.name());
+    }
+
+    private void recordVisualEvent(String kind, JSONObject details) {
+        if (captureStore != null && captureStore.isActive()) captureStore.record(kind, details);
     }
 
     private OfferParseResult processSnapshot(List<AccessibilityNode> snapshot, long startedAt,
@@ -551,7 +862,7 @@ public final class UberAccessibilityService extends AccessibilityService {
 
         try {
             long parserStartedAt = SystemClock.elapsedRealtime();
-            OfferParseResult result = parser.parseNodes(snapshot, captureActive);
+            OfferParseResult result = accessibilityCaptureSource.parse(snapshot, captureActive);
             long parserDurationMillis = SystemClock.elapsedRealtime() - parserStartedAt;
             DiagnosticLogStore.recordParserResult(this, result);
             if (captureActive) recordParserDiagnostics(snapshot, result, request, activePackage, windowMetadata,
@@ -586,8 +897,13 @@ public final class UberAccessibilityService extends AccessibilityService {
             processMissing(result == null ? "parser_unavailable" : result.rejectionReason(), startedAt);
             return;
         }
-        OfferLifecycleEvent transition = lifecycle.observe(Optional.of(result.offer()), SystemClock.uptimeMillis());
-        recordLifecycle(transition, result.offer());
+        applyOffer(result.offer(), startedAt, snapshotOrigin);
+    }
+
+    private void applyOffer(TripOffer newOffer, long startedAt, String snapshotOrigin) {
+        if (newOffer == null || lifecycle == null || config == null || !config.monitoringEnabled()) return;
+        OfferLifecycleEvent transition = lifecycle.observe(Optional.of(newOffer), SystemClock.uptimeMillis());
+        recordLifecycle(transition, newOffer);
         if (!transition.transitioned()) {
             DiagnosticLogStore.recordProcessingTime(this, SystemClock.elapsedRealtime() - startedAt);
             return;
@@ -595,6 +911,8 @@ public final class UberAccessibilityService extends AccessibilityService {
         logTransition(transition);
         if (transition.state() == OfferLifecycleState.OFFER_DISAPPEARED) {
             activeOfferSnapshot = null;
+            visualCaptureGeneration.incrementAndGet();
+            if (screenshotCaptureSource != null) screenshotCaptureSource.cancelPending();
             hideOverlay("offer_disappeared");
             DiagnosticLogStore.recordProcessingTime(this, SystemClock.elapsedRealtime() - startedAt);
             return;
@@ -634,6 +952,8 @@ public final class UberAccessibilityService extends AccessibilityService {
             logTransition(event);
             if (event.state() == OfferLifecycleState.OFFER_DISAPPEARED) {
                 activeOfferSnapshot = null;
+                visualCaptureGeneration.incrementAndGet();
+                if (screenshotCaptureSource != null) screenshotCaptureSource.cancelPending();
                 hideOverlay("offer_disappeared");
             }
         }
@@ -656,6 +976,8 @@ public final class UberAccessibilityService extends AccessibilityService {
             uberVisible = !windows.roots.isEmpty();
             uberWindowCount = windows.roots.size();
             if (!uberVisible) {
+                visualCaptureGeneration.incrementAndGet();
+                if (screenshotCaptureSource != null) screenshotCaptureSource.cancelPending();
                 if (captureStore != null && captureStore.isActive()) {
                     long now = SystemClock.elapsedRealtime();
                     if (now - lastPollStatusAt >= 5_000) {
@@ -676,8 +998,15 @@ public final class UberAccessibilityService extends AccessibilityService {
                 if (activeOrder != 0) return activeOrder;
                 return Integer.compare(right.layer, left.layer);
             });
+            OfferCaptureStrategy strategy = config.offerCaptureStrategy();
+            if (strategy == OfferCaptureStrategy.OCR_ONLY) {
+                WindowRoot target = windows.roots.get(0);
+                requestVisualCapture(target.id, "foreground_poll_ocr_only", null, true, pollStartedAt);
+                return;
+            }
             int examined = Math.min(MAX_POLL_WINDOWS, windows.roots.size());
             OfferParseResult selectedOffer = null;
+            int selectedOfferWindowId = -1;
             int selectedScore = Integer.MIN_VALUE;
             String rejectionReason = "empty_uber_tree";
             boolean parsedWindow = false;
@@ -734,6 +1063,7 @@ public final class UberAccessibilityService extends AccessibilityService {
                     if (score > selectedScore) {
                         selectedOffer = result;
                         selectedScore = score;
+                        selectedOfferWindowId = window.id;
                     }
                 } else if (rejectionReason.equals("empty_uber_tree")) {
                     rejectionReason = result.rejectionReason();
@@ -741,6 +1071,13 @@ public final class UberAccessibilityService extends AccessibilityService {
             }
             if (selectedOffer != null) {
                 applyOfferResult(selectedOffer, pollStartedAt, "uber_window_poll");
+                if (strategy == OfferCaptureStrategy.COMPARATIVE) {
+                    requestVisualCapture(selectedOfferWindowId, "comparative_foreground_poll",
+                            selectedOffer, true, pollStartedAt);
+                }
+            } else if (strategy.usesVisualCapture()) {
+                WindowRoot target = windows.roots.get(0);
+                requestVisualCapture(target.id, "foreground_poll_fallback", null, true, pollStartedAt);
             } else if (snapshotChanged && parsedWindow
                     && (activeOfferSnapshot == null || !unchangedWindow)) {
                 processMissing(rejectionReason, pollStartedAt);

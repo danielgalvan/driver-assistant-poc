@@ -1,7 +1,7 @@
 <resources>
     <string name="app_name">Driver Assistant</string>
     <string name="accessibility_service_label">Monitoramento do Uber Driver</string>
-    <string name="accessibility_service_description">Observa metadados de eventos e janelas para detectar quando o Uber Driver está visível. Lê a árvore de acessibilidade somente do Uber Driver; não aceita nem recusa corridas.</string>
+    <string name="accessibility_service_description">Observa eventos e janelas para detectar o Uber Driver. Lê somente a árvore do Uber Driver. A captura de tela e o OCR local só funcionam quando você seleciona um modo visual nas configurações; imagens não são salvas nem enviadas. Não aceita nem recusa corridas.</string>
     <string name="home_title">Driver Assistant</string>
     <string name="home_subtitle">Diagnóstico local de ofertas</string>
     <string name="section_status">Status</string>
@@ -90,6 +90,12 @@
     <string name="offer_disappearance_tolerance">Tolerância para desaparecimento (ms)</string>
     <string name="offer_disappearance_tolerance_hint">De 250 a 10000 ms</string>
     <string name="diagnostics_title">Diagnóstico</string>
+    <string name="offer_capture_strategy">Estratégia de captura</string>
+    <string name="capture_accessibility_only">Somente acessibilidade (padrão)</string>
+    <string name="capture_ocr_only">Somente OCR (experimental)</string>
+    <string name="capture_hybrid">Híbrido: acessibilidade + fallback OCR</string>
+    <string name="capture_comparative">Diagnóstico comparativo (experimental)</string>
+    <string name="offer_capture_disclosure">Os modos OCR usam screenshots da janela Uber e reconhecimento local offline. Ao escolher um modo visual, você ativa explicitamente essa captura. Imagens são processadas em memória, não são salvas nem enviadas. No Android 11–13, a captura de tela inteira só é usada com o Uber em primeiro plano e conteúdo de janelas externas é mascarado; se não for possível isolar a janela, o screenshot é descartado. No Android 14+, é priorizada a captura da janela Uber.</string>
     <string name="detailed_diagnostics">Diagnóstico detalhado da estrutura acessível</string>
     <string name="detailed_diagnostics_disclosure">Registra apenas classes, IDs de recurso e comprimentos de texto; nomes, endereços e conteúdo textual não são armazenados.</string>
     <string name="settings_title">Configurações</string>
