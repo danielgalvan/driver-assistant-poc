@@ -5,6 +5,7 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.os.Debug;
 import android.graphics.Bitmap;
 import android.graphics.Rect;
 import android.view.accessibility.AccessibilityEvent;
@@ -70,6 +71,7 @@ public final class UberAccessibilityService extends AccessibilityService {
     private final Runnable foregroundWatch = new Runnable() {
         @Override public void run() { runForegroundPoll(); }
     };
+    private final Runnable interruptRecovery = () -> recoverFromInterrupt("scheduled_recovery");
     private final OfferParser parser = new OfferParser();
     private final UberPageContextDetector pageContextDetector = new UberPageContextDetector();
     private final AccessibilityTreeReader treeReader = new AccessibilityTreeReader();
@@ -102,6 +104,7 @@ public final class UberAccessibilityService extends AccessibilityService {
     private volatile long lastPollTimingAt;
     private volatile long lastPollStartedAt;
     private long lastPageSuppressionDiagnosticAt;
+    private long lastRuntimeHealthAt;
     private String lastCaptureSessionId;
     private String lastParserDiagnosticFingerprint;
     private long lastParserDiagnosticAt;
@@ -281,6 +284,7 @@ public final class UberAccessibilityService extends AccessibilityService {
     @Override
     protected void onServiceConnected() {
         super.onServiceConnected();
+        mainHandler.removeCallbacks(interruptRecovery);
         paused = false;
         shuttingDown = false;
         activeService = this;
@@ -294,12 +298,19 @@ public final class UberAccessibilityService extends AccessibilityService {
         ensureCaptureSources();
         analysisHandler.post(() -> DiagnosticLogStore.record(this, "DA_ACCESSIBILITY",
                 "SERVICE_CONNECTED", "target=uber_driver"));
+        if (captureStore.isActive()) {
+            captureStore.record("SERVICE_CONNECTED", DiagnosticCaptureStore.object(
+                    "monitoring_enabled", config.monitoringEnabled(),
+                    "capture_strategy", config.offerCaptureStrategy().name()));
+        }
         if (config.monitoringEnabled()) startForegroundWatch();
     }
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
-        if (paused || shuttingDown || event == null) return;
+        if (shuttingDown || event == null) return;
+        if (paused) recoverFromInterrupt("event_received");
+        if (paused) return;
         ensureInitialized();
         long receivedAt = SystemClock.elapsedRealtime();
         int eventType = event.getEventType();
@@ -583,11 +594,14 @@ public final class UberAccessibilityService extends AccessibilityService {
         hideOverlay("service_interrupted");
         recordAsync("SERVICE_INTERRUPTED", null);
         if (captureStore != null) captureStore.record("SERVICE_INTERRUPTED", DiagnosticCaptureStore.object());
+        mainHandler.removeCallbacks(interruptRecovery);
+        mainHandler.postDelayed(interruptRecovery, 1_500);
     }
 
     @Override
     public void onDestroy() {
         shuttingDown = true;
+        mainHandler.removeCallbacks(interruptRecovery);
         visualCaptureGeneration.incrementAndGet();
         if (screenshotCaptureSource != null) screenshotCaptureSource.close();
         if (ocrTextRecognizer != null) ocrTextRecognizer.close();
@@ -601,6 +615,25 @@ public final class UberAccessibilityService extends AccessibilityService {
         if (captureStore != null) captureStore.record("SERVICE_DISCONNECTED", DiagnosticCaptureStore.object());
         if (analysisThread != null) analysisThread.quitSafely();
         super.onDestroy();
+    }
+
+    private void recoverFromInterrupt(String reason) {
+        if (shuttingDown || !connected || !paused) return;
+        paused = false;
+        startAnalysisThread();
+        ensureInitialized();
+        ensureCaptureSources();
+        Handler handler = analysisHandler;
+        if (handler != null) handler.post(() -> {
+            lastSnapshotFingerprints.clear();
+            DiagnosticLogStore.record(this, "DA_ACCESSIBILITY", "SERVICE_RESUMED_AFTER_INTERRUPT",
+                    "reason=" + safeReason(reason));
+            if (captureStore != null && captureStore.isActive()) {
+                captureStore.record("SERVICE_RESUMED_AFTER_INTERRUPT", DiagnosticCaptureStore.object(
+                        "reason", safeReason(reason), "monitoring_enabled", config.monitoringEnabled()));
+            }
+        });
+        if (config != null && config.monitoringEnabled()) startForegroundWatch();
     }
 
     private void ensureInitialized() {
@@ -787,6 +820,14 @@ public final class UberAccessibilityService extends AccessibilityService {
         for (Map.Entry<TripOffer.Field, String> entry : reconciliation.fieldOrigins().entrySet()) {
             fieldOrigins.put(DiagnosticCaptureStore.object("field", entry.getKey().name(), "source", entry.getValue()));
         }
+        JSONArray fieldConflicts = new JSONArray();
+        for (OfferCaptureCoordinator.FieldConflict conflict : reconciliation.fieldConflicts()) {
+            fieldConflicts.put(DiagnosticCaptureStore.object("field", conflict.field().name(),
+                    "accessibility_value", safeFieldValue(conflict.field(), conflict.accessibilityValue()),
+                    "ocr_value", safeFieldValue(conflict.field(), conflict.ocrValue()),
+                    "selected_source", conflict.selectedSource(),
+                    "decision", "keep_accessibility_until_ocr_confirmation"));
+        }
         boolean divergent = reconciliation.status() == OfferCaptureCoordinator.Status.DIVERGENT;
         recordVisualEvent(divergent ? "OFFER_SOURCE_DIVERGENCE" : "OFFER_CAPTURE_COMPARISON",
                 DiagnosticCaptureStore.object("capture_id", requestId, "strategy", strategy.name(),
@@ -794,9 +835,15 @@ public final class UberAccessibilityService extends AccessibilityService {
                         "accessibility_rejection", accessibilityResult == null ? null : accessibilityResult.rejectionReason(),
                         "ocr_accepted", ocrOffer != null, "ocr_rejection", ocrRejection,
                         "reconciliation", reconciliation.status().name(), "field_origins", fieldOrigins,
+                        "field_conflicts", fieldConflicts,
                         "capture_ms", capture.captureMillis, "ocr_ms", recognition.processingMillis(),
                         "total_ms", Math.max(0, now - requestedAt),
                         "offer_to_result_ms", Math.max(0, now - sourceStartedAt)));
+        if (fieldConflicts.length() > 0) {
+            recordVisualEvent("OFFER_FIELD_DIVERGENCE", DiagnosticCaptureStore.object(
+                    "capture_id", requestId, "field_conflicts", fieldConflicts,
+                    "decision", "keep_accessibility_value_until_repeated_ocr_value"));
+        }
 
         DiagnosticLogStore.record(this, "DA_OCR", "CAPTURE_COMPARED",
                 "strategy=" + strategy.name() + "; candidate=" + (ocrOffer != null)
@@ -951,8 +998,11 @@ public final class UberAccessibilityService extends AccessibilityService {
             if (overlay != null && overlay.isVisible()) hideOverlay("uber_page_not_home");
             return;
         }
-        OfferLifecycleEvent transition = lifecycle.observe(Optional.of(newOffer), SystemClock.uptimeMillis());
-        recordLifecycle(transition, newOffer);
+        OfferLifecycleMachine.ObservationSource observationSource = observationSource(snapshotOrigin);
+        OfferLifecycleEvent transition = lifecycle.observe(Optional.of(newOffer), SystemClock.uptimeMillis(),
+                observationSource);
+        recordLifecycle(transition, transition.offer());
+        recordFieldDecisions(transition, observationSource, snapshotOrigin);
         if (!transition.transitioned()) {
             if (overlay != null) overlay.keepAlive(transition.sessionId());
             DiagnosticLogStore.recordProcessingTime(this, SystemClock.elapsedRealtime() - startedAt);
@@ -976,27 +1026,31 @@ public final class UberAccessibilityService extends AccessibilityService {
         if (transition.state() == OfferLifecycleState.OFFER_DETECTED) {
             DiagnosticLogStore.recordOffer(this, offer, metrics, classification.incomplete());
             startForegroundWatch();
+            recordOfferRecognition(offer, transition.sessionId(), snapshotOrigin, classification);
         } else {
             DiagnosticLogStore.updateLastOffer(this, offer, metrics);
         }
         DiagnosticLogStore.record(this, "DA_CALCULATOR", "CLASSIFIED",
                 "overall=" + classification.overallSignal() + "; incomplete=" + classification.incomplete());
+        recordOfferClassification(offer, transition.sessionId(), snapshotOrigin, metrics, classification);
         if (overlay == null) overlay = new OverlayController(this);
         simulationEpoch++;
         long overlayRequestedAt = SystemClock.elapsedRealtime();
         overlay.show(offer, metrics, classification, transition.sessionId(), false);
         if (captureStore != null && captureStore.isActive()) {
             captureStore.record("OFFER_TO_OVERLAY_REQUEST", DiagnosticCaptureStore.object(
+                    "offer_session_id", transition.sessionId(),
                     "snapshot_origin", snapshotOrigin, "event_received_elapsed_ms", startedAt,
                     "overlay_request_elapsed_ms", overlayRequestedAt,
                     "event_to_overlay_request_ms", Math.max(0, overlayRequestedAt - startedAt),
-                    "overlay_enabled", config.overlayEnabled()));
+                    "overlay_enabled", config.overlayEnabled(),
+                    "initial_offer_display", transition.state() == OfferLifecycleState.OFFER_DETECTED));
         }
     }
 
     private void processMissing(String reason, long startedAt) {
         OfferLifecycleEvent event = lifecycle.observe(Optional.empty(), SystemClock.uptimeMillis());
-        recordLifecycle(event, null);
+        recordLifecycle(event, event.offer());
         DiagnosticLogStore.record(this, "DA_OFFER", "OFFER_CANDIDATE_MISSING", "reason=" + safeReason(reason));
         if (event.transitioned()) {
             logTransition(event);
@@ -1183,8 +1237,23 @@ public final class UberAccessibilityService extends AccessibilityService {
                             "diagnostic_writer_append_ms", captureStore.lastWriteDurationMillis()));
                     lastPollTimingAt = now;
                 }
+                recordRuntimeHealthIfDue(now);
             }
         }
+    }
+
+    private void recordRuntimeHealthIfDue(long nowElapsed) {
+        if (nowElapsed - lastRuntimeHealthAt < 60_000) return;
+        lastRuntimeHealthAt = nowElapsed;
+        Runtime runtime = Runtime.getRuntime();
+        long heapUsed = runtime.totalMemory() - runtime.freeMemory();
+        captureStore.record("RUNTIME_HEALTH", DiagnosticCaptureStore.object(
+                "pss_kb", Debug.getPss(), "java_heap_used_bytes", heapUsed,
+                "java_heap_max_bytes", runtime.maxMemory(),
+                "native_heap_allocated_bytes", Debug.getNativeHeapAllocatedSize(),
+                "diagnostic_writer_queue_ms", captureStore.lastWriteQueueMillis(),
+                "diagnostic_writer_append_ms", captureStore.lastWriteDurationMillis(),
+                "pending_diagnostic_write_bytes", captureStore.pendingWriteBytes()));
     }
 
     private boolean isUberWindowActive() {
@@ -1269,6 +1338,86 @@ public final class UberAccessibilityService extends AccessibilityService {
         if (event == null || !event.transitioned()) return;
         DiagnosticLogStore.record(this, "DA_OFFER", "LIFECYCLE_TRANSITION",
                 "state=" + event.state() + "; session=" + event.sessionId() + "; reason=" + event.reason());
+    }
+
+    private void recordOfferRecognition(TripOffer offer, long offerSessionId, String source,
+                                        ClassificationResult classification) {
+        if (captureStore == null || !captureStore.isActive()) return;
+        List<String> available = new java.util.ArrayList<>();
+        List<String> unavailable = new java.util.ArrayList<>();
+        for (TripOffer.Field field : TripOffer.Field.values()) {
+            (offer.hasValue(field) ? available : unavailable).add(field.name());
+        }
+        captureStore.record("OFFER_RECOGNIZED", DiagnosticCaptureStore.object(
+                "offer_session_id", offerSessionId, "source", source,
+                "amount", offer.offeredAmount(),
+                "category", DiagnosticTextSanitizer.sanitizeCategory(offer.category()),
+                "rating", offer.passengerRating(), "pickup_km", offer.pickupDistanceKm(),
+                "pickup_minutes", offer.pickupEtaMinutes(), "trip_km", offer.tripDistanceKm(),
+                "trip_minutes", offer.tripDurationMinutes(),
+                "available_fields", DiagnosticCaptureStore.array(available),
+                "unavailable_fields", DiagnosticCaptureStore.array(unavailable),
+                "initially_incomplete", classification.incomplete()));
+    }
+
+    private void recordOfferClassification(TripOffer offer, long offerSessionId, String source,
+                                           RideMetrics metrics, ClassificationResult classification) {
+        if (captureStore == null || !captureStore.isActive()) return;
+        JSONObject indicators = new JSONObject();
+        for (Map.Entry<com.driverassistant.domain.Indicator, com.driverassistant.domain.IndicatorResult> entry
+                : classification.indicators().entrySet()) {
+            try {
+                indicators.put(entry.getKey().name(), DiagnosticCaptureStore.object(
+                        "value", entry.getValue().value(), "signal", entry.getValue().signal().name(),
+                        "enabled", entry.getValue().enabled()));
+            } catch (org.json.JSONException ignored) { /* Preserve the other indicators. */ }
+        }
+        captureStore.record("OFFER_CLASSIFICATION", DiagnosticCaptureStore.object(
+                "offer_session_id", offerSessionId, "source", source,
+                "overall_signal", classification.overallSignal().name(),
+                "incomplete", classification.incomplete(), "individual_only", classification.individualOnly(),
+                "amount", offer.offeredAmount(), "rating", offer.passengerRating(),
+                "total_km", metrics.totalDistanceKm(), "total_minutes", metrics.totalDurationMinutes(),
+                "indicators", indicators));
+    }
+
+    private void recordFieldDecisions(OfferLifecycleEvent event,
+                                      OfferLifecycleMachine.ObservationSource source, String snapshotOrigin) {
+        if (captureStore == null || !captureStore.isActive() || event.fieldDecisions().isEmpty()) return;
+        for (OfferLifecycleEvent.FieldDecision decision : event.fieldDecisions()) {
+            String kind = switch (decision.decision()) {
+                case "accepted_enrichment" -> "OFFER_FIELD_ENRICHED";
+                case "held_for_ocr_confirmation", "held_replacement_for_confirmation" -> "OFFER_FIELD_CHANGE_PENDING";
+                case "accepted_repeated_ocr_change", "accepted_accessibility_change" -> "OFFER_FIELD_CONFIRMED_UPDATE";
+                case "retain_valid_value_after_partial_capture", "kept_existing_within_tolerance" -> "OFFER_FIELD_RETAINED";
+                default -> "OFFER_FIELD_DECISION";
+            };
+            captureStore.record(kind, DiagnosticCaptureStore.object(
+                    "offer_session_id", event.sessionId(), "field", decision.field().name(),
+                    "previous_value", safeFieldValue(decision.field(), decision.previousValue()),
+                    "observed_value", safeFieldValue(decision.field(), decision.observedValue()),
+                    "accepted_value", safeFieldValue(decision.field(), decision.acceptedValue()),
+                    "decision", decision.decision(), "confirmations", decision.confirmations(),
+                    "source", decision.source(), "snapshot_origin", snapshotOrigin));
+        }
+        DiagnosticLogStore.record(this, "DA_OFFER", "FIELD_DECISIONS",
+                "session=" + event.sessionId() + "; source=" + source.name()
+                        + "; count=" + event.fieldDecisions().size() + "; reason=" + safeReason(event.reason()));
+    }
+
+    private static OfferLifecycleMachine.ObservationSource observationSource(String snapshotOrigin) {
+        if (snapshotOrigin == null) return OfferLifecycleMachine.ObservationSource.ACCESSIBILITY;
+        if (snapshotOrigin.contains("merged")) return OfferLifecycleMachine.ObservationSource.MIXED;
+        return snapshotOrigin.contains("ocr")
+                ? OfferLifecycleMachine.ObservationSource.OCR
+                : OfferLifecycleMachine.ObservationSource.ACCESSIBILITY;
+    }
+
+    private static Object safeFieldValue(TripOffer.Field field, Object value) {
+        if (field == TripOffer.Field.CATEGORY && value != null) {
+            return DiagnosticTextSanitizer.sanitizeCategory(value.toString());
+        }
+        return value;
     }
 
     private void recordLifecycle(OfferLifecycleEvent event, TripOffer offer) {
@@ -1529,7 +1678,7 @@ public final class UberAccessibilityService extends AccessibilityService {
 
         TripOffer offer;
         if ("incomplete".equals(normalized)) {
-            offer = new TripOffer(amount, "UberX (simulado)", null, 1.5, 8.0, null, null, null, null);
+            offer = new TripOffer(amount, "UberX (simulado)", null, 1.5, 8.0, null, null);
         } else if ("no_rating".equals(normalized)) {
             offer = simulatedOffer(amount, null);
         } else {
@@ -1557,7 +1706,7 @@ public final class UberAccessibilityService extends AccessibilityService {
     }
 
     private TripOffer simulatedOffer(Double amount, Double rating) {
-        return new TripOffer(amount, "UberX (simulado)", rating, 1.5, 8.0, 4.5, 22.0, null, null);
+        return new TripOffer(amount, "UberX (simulado)", rating, 1.5, 8.0, 4.5, 22.0);
     }
 
     private void showSimulation(TripOffer offer, long session) {

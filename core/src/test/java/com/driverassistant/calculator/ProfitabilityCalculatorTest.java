@@ -45,6 +45,6 @@ public final class ProfitabilityCalculatorTest {
     private static TripOffer offer(Double amount, Double pickupKm, Double tripKm,
                                    Double pickupMinutes, Double tripMinutes) {
         return new TripOffer(amount, null, null, pickupKm, pickupMinutes,
-                tripKm, tripMinutes, null, null);
+                tripKm, tripMinutes);
     }
 }

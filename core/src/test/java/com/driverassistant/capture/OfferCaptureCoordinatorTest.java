@@ -51,6 +51,26 @@ public final class OfferCaptureCoordinatorTest {
         assertNull(result.offer());
     }
 
+    @Test public void conflictingFareKeepsAccessibilityValueAndRecordsTheConflict() {
+        TripOffer accessibility = offer(29.09, "UberX", 5.0, 0.8, 7.0, 10.8, 33.0);
+        TripOffer ocr = offer(29.55, "UberX", 5.0, 0.8, 7.0, 10.8, 33.0);
+        OfferCaptureCoordinator.Reconciliation result = coordinator.reconcile(accessibility, ocr);
+
+        assertEquals(OfferCaptureCoordinator.Status.MERGED, result.status());
+        assertEquals(Double.valueOf(29.09), result.offer().offeredAmount());
+        assertEquals(1, result.fieldConflicts().size());
+        assertEquals(TripOffer.Field.AMOUNT, result.fieldConflicts().get(0).field());
+        assertEquals("accessibility", result.fieldConflicts().get(0).selectedSource());
+    }
+
+    @Test public void fareAloneCannotConfirmThatTwoSourcesShowTheSameOffer() {
+        TripOffer accessibility = new TripOffer(29.09, null, null, null, null, null, null);
+        TripOffer ocr = new TripOffer(29.09, null, null, null, null, null, null);
+
+        assertEquals(OfferCaptureCoordinator.Status.DIVERGENT,
+                coordinator.reconcile(accessibility, ocr).status());
+    }
+
     @Test public void unknownStoredStrategyFallsBackToAccessibilityOnly() {
         assertEquals(OfferCaptureStrategy.ACCESSIBILITY_ONLY,
                 OfferCaptureStrategy.fromStoredValue("FUTURE_UNKNOWN"));
@@ -58,6 +78,6 @@ public final class OfferCaptureCoordinatorTest {
 
     private static TripOffer offer(double amount, String category, double rating,
                                    double pickup, Double pickupEta, double trip, Double duration) {
-        return new TripOffer(amount, category, rating, pickup, pickupEta, trip, duration, null, null);
+        return new TripOffer(amount, category, rating, pickup, pickupEta, trip, duration);
     }
 }

@@ -21,6 +21,7 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import androidx.appcompat.app.AppCompatActivity;
 
 import com.driverassistant.R;
+import com.driverassistant.BuildConfig;
 import com.driverassistant.service.UberAccessibilityService;
 import com.driverassistant.calculator.ClassificationService;
 import com.driverassistant.calculator.ProfitabilityCalculator;
@@ -38,6 +39,7 @@ import com.google.android.material.card.MaterialCardView;
 import com.google.android.material.button.MaterialButton;
 
 import android.os.Bundle;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 
@@ -234,11 +236,28 @@ public final class MainActivity extends AppCompatActivity {
 
     private void startCaptureNow() {
         if (captureStore.startCapture()) {
+            var thresholds = config.loadThresholds();
             captureStore.record("MODE_STATE", DiagnosticCaptureStore.object(
                     "reason", "capture_started",
                     "accessibility_service_connected", UberAccessibilityService.isConnected(),
                     "monitoring_enabled", config.monitoringEnabled(),
                     "overlay_configured", config.overlayEnabled()));
+            captureStore.record("SESSION_CONTEXT", DiagnosticCaptureStore.object(
+                    "app_version", BuildConfig.VERSION_NAME, "version_code", BuildConfig.VERSION_CODE,
+                    "android_api", Build.VERSION.SDK_INT,
+                    "capture_strategy", config.offerCaptureStrategy().name(),
+                    "monitoring_enabled", config.monitoringEnabled(),
+                    "overlay_enabled", config.overlayEnabled(),
+                    "overlay_duration_seconds", config.overlayDurationSeconds(),
+                    "overlay_position", config.overlayPosition(),
+                    "offer_disappearance_tolerance_ms", config.offerDisappearanceToleranceMillis(),
+                    "classification_strategy", thresholds.strategy().name(),
+                    "per_km_enabled", thresholds.perKmEnabled(), "per_km_red_below", thresholds.perKmRedBelow(),
+                    "per_km_green_from", thresholds.perKmGreenFrom(),
+                    "per_hour_enabled", thresholds.perHourEnabled(), "per_hour_red_below", thresholds.perHourRedBelow(),
+                    "per_hour_green_from", thresholds.perHourGreenFrom(),
+                    "rating_enabled", thresholds.ratingEnabled(), "rating_red_below", thresholds.ratingRedBelow(),
+                    "rating_green_from", thresholds.ratingGreenFrom()));
             Toast.makeText(this, R.string.capture_started, Toast.LENGTH_SHORT).show();
         } else {
             Toast.makeText(this, R.string.capture_start_failed, Toast.LENGTH_LONG).show();
@@ -368,7 +387,7 @@ public final class MainActivity extends AppCompatActivity {
         double amount = Math.max(thresholds.perKmGreenFrom() * 6.0,
                 thresholds.perHourGreenFrom() * 0.5);
         TripOffer sample = new TripOffer(amount, "Exemplo simulado", 4.70,
-                1.50, 8.0, 4.50, 22.0, null, null);
+                1.50, 8.0, 4.50, 22.0);
         RideMetrics metrics = new ProfitabilityCalculator().calculate(sample);
         ClassificationResult classification = new ClassificationService().classify(
                 metrics, sample.passengerRating(), thresholds);

@@ -16,7 +16,6 @@ import android.widget.TextView;
 import com.google.android.material.card.MaterialCardView;
 
 import com.driverassistant.R;
-import com.driverassistant.calculator.ClassificationService;
 import com.driverassistant.config.ConfigRepository;
 import com.driverassistant.config.ThresholdConfig;
 import com.driverassistant.domain.ClassificationResult;
@@ -41,8 +40,13 @@ public final class OverlayController {
     private final OverlaySessionPolicy sessionPolicy = new OverlaySessionPolicy();
     private View card;
     private Runnable dismissTask;
+    private long dismissSessionId = Long.MIN_VALUE;
     private volatile boolean visible;
     private long lastKeepAliveDiagnosticAt;
+    private long currentSessionId = Long.MIN_VALUE;
+    private long currentDisplayStartedAt;
+    private TripOffer currentOffer;
+    private boolean currentSimulated;
 
     public OverlayController(AccessibilityService service) {
         this.service = service;
@@ -70,12 +74,17 @@ public final class OverlayController {
     public void hide(String reason) {
         handler.post(() -> {
             boolean wasVisible = visible;
+            long sessionId = currentSessionId;
+            long shownForMillis = visibleDurationMillis();
+            TripOffer offer = currentOffer;
+            boolean simulated = currentSimulated;
             sessionPolicy.clear();
             boolean removed = removeOnMainThread();
             if (wasVisible) {
-                recordCapture("OVERLAY_REMOVE_REQUESTED", null, 0, false, "reason=" + safe(reason));
-                recordCapture("OVERLAY_REMOVED", null, 0, false,
-                        "reason=" + safe(reason) + "; removed=" + removed);
+                recordCapture("OVERLAY_REMOVE_REQUESTED", offer, sessionId, simulated,
+                        "requested:" + safe(reason), shownForMillis);
+                recordCapture("OVERLAY_REMOVED", offer, sessionId, simulated,
+                        safe(reason) + "; removed=" + removed, shownForMillis);
             }
         });
     }
@@ -92,7 +101,7 @@ public final class OverlayController {
         long now = android.os.SystemClock.uptimeMillis();
         long durationMillis = config.overlayDurationSeconds() * 1000L;
         if (!sessionPolicy.refresh(sessionId, now, durationMillis)) return;
-        scheduleDismiss(sessionId, null, false);
+        scheduleDismiss(sessionId, currentOffer, currentSimulated);
         if (now - lastKeepAliveDiagnosticAt >= 5_000) {
             lastKeepAliveDiagnosticAt = now;
             DiagnosticLogStore.record(service, "DA_OVERLAY", "OVERLAY_KEEP_ALIVE",
@@ -111,11 +120,21 @@ public final class OverlayController {
             String fingerprint = displayFingerprint(offer, metrics, classification);
             OverlaySessionPolicy.Decision decision = sessionPolicy.show(sessionId, fingerprint, now, durationMillis);
             if (decision == OverlaySessionPolicy.Decision.EXPIRED) {
+                TripOffer displayedOffer = currentOffer;
+                long displayedSessionId = currentSessionId;
+                boolean displayedSimulated = currentSimulated;
+                long shownForMillis = visibleDurationMillis();
                 boolean removed = removeOnMainThread();
                 DiagnosticLogStore.record(service, "DA_OVERLAY", "OVERLAY_EXPIRED", "session=" + sessionId);
-                recordCapture("OVERLAY_EXPIRED", offer, sessionId, simulated,
-                        "reason=session_expired; removed=" + removed);
+                recordCapture("OVERLAY_EXPIRED", displayedOffer == null ? offer : displayedOffer,
+                        displayedSessionId == Long.MIN_VALUE ? sessionId : displayedSessionId,
+                        displayedOffer == null ? simulated : displayedSimulated,
+                        "reason=session_expired; removed=" + removed, shownForMillis);
                 return;
+            }
+            if (decision == OverlaySessionPolicy.Decision.NEW_SESSION && visible) {
+                recordCapture("OVERLAY_REPLACED", currentOffer, currentSessionId, currentSimulated,
+                        "reason=new_offer_session", visibleDurationMillis());
             }
             if (decision == OverlaySessionPolicy.Decision.DUPLICATE) {
                 recordCapture("OVERLAY_SHOW_SUPPRESSED", offer, sessionId, simulated, "reason=duplicate");
@@ -128,14 +147,18 @@ public final class OverlayController {
             }
             ThresholdConfig thresholds = config.loadThresholds();
             bind(card, offer, metrics, classification, thresholds, simulated);
+            if (decision == OverlaySessionPolicy.Decision.NEW_SESSION) {
+                currentSessionId = sessionId;
+                currentDisplayStartedAt = android.os.SystemClock.elapsedRealtime();
+            }
+            currentOffer = offer;
+            currentSimulated = simulated;
             WindowManager.LayoutParams params = layoutParams();
             if (card.getParent() == null) windowManager.addView(card, params);
             else windowManager.updateViewLayout(card, params);
             visible = true;
 
             if (decision == OverlaySessionPolicy.Decision.NEW_SESSION) {
-                scheduleDismiss(sessionId, offer, simulated);
-            } else if (sessionPolicy.refresh(sessionId, now, durationMillis)) {
                 scheduleDismiss(sessionId, offer, simulated);
             }
             DiagnosticLogStore.record(service, "DA_OVERLAY",
@@ -151,8 +174,17 @@ public final class OverlayController {
                     "exception=" + exception.getClass().getSimpleName());
             recordCapture("OVERLAY_ERROR", offer, sessionId, simulated,
                     "exception=" + exception.getClass().getSimpleName());
+            boolean wasVisible = visible;
+            TripOffer displayedOffer = currentOffer;
+            long displayedSessionId = currentSessionId;
+            boolean displayedSimulated = currentSimulated;
+            long shownForMillis = visibleDurationMillis();
             sessionPolicy.clear();
-            removeOnMainThread();
+            boolean removed = removeOnMainThread();
+            if (wasVisible) {
+                recordCapture("OVERLAY_REMOVED", displayedOffer, displayedSessionId, displayedSimulated,
+                        "reason=overlay_error; removed=" + removed, shownForMillis);
+            }
         }
     }
 
@@ -383,6 +415,7 @@ public final class OverlayController {
     private boolean removeOnMainThread() {
         if (dismissTask != null) handler.removeCallbacks(dismissTask);
         dismissTask = null;
+        dismissSessionId = Long.MIN_VALUE;
         boolean removed = true;
         if (card != null && card.getParent() != null) {
             try {
@@ -392,17 +425,33 @@ public final class OverlayController {
             }
         }
         visible = false;
+        currentSessionId = Long.MIN_VALUE;
+        currentDisplayStartedAt = 0;
+        currentOffer = null;
+        currentSimulated = false;
         return removed;
     }
 
     private void scheduleDismiss(long sessionId, TripOffer offer, boolean simulated) {
+        if (dismissTask != null && dismissSessionId == sessionId) return;
         if (dismissTask != null) handler.removeCallbacks(dismissTask);
+        dismissSessionId = sessionId;
         dismissTask = () -> {
+            dismissTask = null;
+            dismissSessionId = Long.MIN_VALUE;
             if (sessionPolicy.expire(sessionId, android.os.SystemClock.uptimeMillis())) {
+                TripOffer displayedOffer = currentOffer;
+                long displayedSessionId = currentSessionId;
+                boolean displayedSimulated = currentSimulated;
+                long shownForMillis = visibleDurationMillis();
                 boolean removed = removeOnMainThread();
                 DiagnosticLogStore.record(service, "DA_OVERLAY", "OVERLAY_EXPIRED", "session=" + sessionId);
-                recordCapture("OVERLAY_EXPIRED", offer, sessionId, simulated,
-                        "reason=display_duration_without_fresh_offer; removed=" + removed);
+                recordCapture("OVERLAY_EXPIRED", displayedOffer == null ? offer : displayedOffer,
+                        displayedSessionId == Long.MIN_VALUE ? sessionId : displayedSessionId,
+                        displayedOffer == null ? simulated : displayedSimulated,
+                        "reason=display_duration_without_fresh_offer; removed=" + removed, shownForMillis);
+            } else if (sessionPolicy.sessionId() == sessionId && visible) {
+                scheduleDismiss(sessionId, currentOffer, currentSimulated);
             }
         };
         handler.postDelayed(dismissTask, sessionPolicy.remainingMillis(
@@ -410,10 +459,17 @@ public final class OverlayController {
     }
 
     private void recordCapture(String kind, TripOffer offer, long sessionId, boolean simulated, String reason) {
+        recordCapture(kind, offer, sessionId, simulated, reason, -1);
+    }
+
+    private void recordCapture(String kind, TripOffer offer, long sessionId, boolean simulated,
+                               String reason, long visibleDurationMillis) {
         DiagnosticCaptureStore store = DiagnosticCaptureStore.get(service);
         if (!store.isActive()) return;
         store.record(kind, DiagnosticCaptureStore.object(
-                "session_id", sessionId, "simulated", simulated, "reason", reason,
+                "session_id", sessionId, "offer_session_id", sessionId,
+                "simulated", simulated, "reason", reason,
+                "visible_duration_ms", visibleDurationMillis < 0 ? null : visibleDurationMillis,
                 "amount", offer == null ? null : offer.offeredAmount(),
                 "category", offer == null ? null : DiagnosticTextSanitizer.sanitizeCategory(offer.category()),
                 "rating", offer == null ? null : offer.passengerRating(),
@@ -421,6 +477,11 @@ public final class OverlayController {
                 "pickup_minutes", offer == null ? null : offer.pickupEtaMinutes(),
                 "trip_km", offer == null ? null : offer.tripDistanceKm(),
                 "trip_minutes", offer == null ? null : offer.tripDurationMinutes()));
+    }
+
+    private long visibleDurationMillis() {
+        return currentDisplayStartedAt <= 0 ? 0
+                : Math.max(0, android.os.SystemClock.elapsedRealtime() - currentDisplayStartedAt);
     }
 
     private static String safe(String value) {

@@ -8,6 +8,7 @@ public final class DiagnosticCapturePolicy {
     public static final long DEFAULT_MAX_DURATION_MILLIS = 8L * 60 * 60 * 1000;
     public static final long MIN_SNAPSHOT_INTERVAL_MILLIS = 1_000;
     public static final long OFFER_SNAPSHOT_REFRESH_MILLIS = 10_000;
+    public static final long TERMINAL_EVENT_RESERVE_BYTES = 2_048;
 
     public enum AppendResult { APPENDED, INACTIVE, DURATION_LIMIT, STORAGE_LIMIT }
 
@@ -99,12 +100,20 @@ public final class DiagnosticCapturePolicy {
     }
 
     public synchronized AppendResult reserve(long nowMillis, long additionalBytes) {
+        return reserve(nowMillis, additionalBytes, 0);
+    }
+
+    /** Reserves bounded space for the final stop event and pending skip summary. */
+    public synchronized AppendResult reserve(long nowMillis, long additionalBytes,
+                                             long requiredRemainingBytes) {
         if (!active) return AppendResult.INACTIVE;
         if (nowMillis < startedAtMillis || nowMillis - startedAtMillis >= maxDurationMillis) {
             stop("duration_limit");
             return AppendResult.DURATION_LIMIT;
         }
-        if (additionalBytes < 0 || additionalBytes > maxStorageBytes - reservedBytes) {
+        long availableBytes = maxStorageBytes - reservedBytes;
+        if (additionalBytes < 0 || requiredRemainingBytes < 0 || requiredRemainingBytes > availableBytes
+                || additionalBytes > availableBytes - requiredRemainingBytes) {
             stop("storage_limit");
             return AppendResult.STORAGE_LIMIT;
         }

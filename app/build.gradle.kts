@@ -6,6 +6,10 @@ android {
     namespace = "com.driverassistant"
     compileSdk = 37
 
+    buildFeatures {
+        buildConfig = true
+    }
+
     defaultConfig {
         applicationId = "com.driverassistant"
         minSdk = 29

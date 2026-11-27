@@ -9,6 +9,7 @@ import android.os.SystemClock;
 import android.util.Log;
 
 import com.driverassistant.diagnostics.DiagnosticCapturePolicy;
+import com.driverassistant.diagnostics.DiagnosticSessionSummary;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -29,7 +30,9 @@ import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Properties;
 import java.util.TimeZone;
 import java.util.UUID;
@@ -46,6 +49,7 @@ public final class DiagnosticCaptureStore {
     private static final String PREFERENCES = "driver_assistant_capture_settings";
     private static final String LIMIT_MB_KEY = "storage_limit_mb";
     private static final long MB = 1024L * 1024L;
+    private static final long MAX_PENDING_WRITE_BYTES = 8L * MB;
     private static final long FILE_RETENTION_MILLIS = 7L * 24 * 60 * 60 * 1000;
     private static final String EVENTS_FILE = "capture.jsonl";
     private static final String STATE_FILE = "capture-state.properties";
@@ -66,6 +70,9 @@ public final class DiagnosticCaptureStore {
     private volatile long eventCount;
     private volatile long lastWriteQueueMillis;
     private volatile long lastWriteDurationMillis;
+    private volatile long pendingWriteBytes;
+    private volatile long writerQueueDroppedRecords;
+    private volatile String lastWriterDroppedKind;
     private String sessionId;
     private long sessionStartedAt;
     private long sessionMaxStorageBytes;
@@ -122,6 +129,8 @@ public final class DiagnosticCaptureStore {
             lastSkipRecordAt = 0;
             skippedEventsSinceRecord = 0;
             lastSkippedEventUptime = 0;
+            writerQueueDroppedRecords = 0;
+            lastWriterDroppedKind = null;
             active = true;
             writeStateLocked();
             appendLocked("SESSION_STARTED", object("source", "manual"), false);
@@ -135,7 +144,9 @@ public final class DiagnosticCaptureStore {
             flushSkippedEventsLocked(false);
             if (!active) return;
             String safeReason = reason == null || reason.isBlank() ? "manual" : reason;
-            appendLocked("SESSION_STOPPED", object("reason", safeReason), true);
+            appendLocked("SESSION_STOPPED", object("reason", safeReason,
+                    "writer_queue_dropped_records", writerQueueDroppedRecords,
+                    "last_writer_queue_dropped_kind", lastWriterDroppedKind), true);
             active = false;
             stopReason = safeReason;
             policy.stop(safeReason);
@@ -220,6 +231,9 @@ public final class DiagnosticCaptureStore {
                     reservedBytes = 0;
                     nextSequence = 0;
                     eventCount = 0;
+                    writerQueueDroppedRecords = 0;
+                    lastWriterDroppedKind = null;
+                    pendingWriteBytes = 0;
                     stopReason = null;
                     lastSkippedReason = null;
                     lastSkipRecordAt = 0;
@@ -254,21 +268,47 @@ public final class DiagnosticCaptureStore {
                 + "\",\"events\":[");
         boolean first = true;
         long invalidLinesSkipped = 0;
+        Map<String, DiagnosticSessionSummary> summaries = new LinkedHashMap<>();
         if (eventsFile.exists()) {
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(
                     new FileInputStream(eventsFile), StandardCharsets.UTF_8), 32 * 1024)) {
                 String line;
                 while ((line = reader.readLine()) != null) {
                     if (line.isBlank()) continue;
-                    try { new JSONObject(line); }
+                    JSONObject event;
+                    try { event = new JSONObject(line); }
                     catch (JSONException incompleteWrite) { invalidLinesSkipped++; continue; }
                     if (!first) writeUtf8(zip, ",");
                     writeUtf8(zip, line);
                     first = false;
+                    String captureSessionId = event.optString("session_id", "unknown");
+                    DiagnosticSessionSummary summary = summaries.computeIfAbsent(captureSessionId,
+                            ignored -> new DiagnosticSessionSummary());
+                    summary.accept(event.optString("kind", "UNKNOWN"), event.optLong("elapsed_ms", 0),
+                            summaryFields(event.optJSONObject("details")));
                 }
             }
         }
         writeUtf8(zip, "]}");
+        zip.closeEntry();
+        zip.putNextEntry(new ZipEntry("summary.json"));
+        JSONObject summaryJson = new JSONObject();
+        JSONArray sessions = new JSONArray();
+        try {
+            summaryJson.put("schema_version", 1);
+            summaryJson.put("generated_at", timestamp(System.currentTimeMillis()));
+            for (Map.Entry<String, DiagnosticSessionSummary> entry : summaries.entrySet()) {
+                JSONObject session = new JSONObject();
+                session.put("capture_session_id", entry.getKey());
+                session.put("summary", jsonValue(entry.getValue().toMap()));
+                sessions.put(session);
+            }
+            summaryJson.put("session_count", sessions.length());
+            summaryJson.put("sessions", sessions);
+            writeUtf8(zip, summaryJson.toString());
+        } catch (JSONException failure) {
+            throw new IOException("Não foi possível gerar summary.json", failure);
+        }
         zip.closeEntry();
         if (invalidLinesSkipped > 0) {
             zip.putNextEntry(new ZipEntry("export-warnings.txt"));
@@ -278,6 +318,41 @@ public final class DiagnosticCaptureStore {
         }
         zip.finish();
         zip.flush();
+    }
+
+    private static Map<String, String> summaryFields(JSONObject details) {
+        Map<String, String> fields = new LinkedHashMap<>();
+        if (details == null) return fields;
+        JSONArray names = details.names();
+        if (names == null) return fields;
+        for (int index = 0; index < names.length(); index++) {
+            String key = names.optString(index);
+            Object value = details.opt(key);
+            if (value == null || value == JSONObject.NULL) continue;
+            if (value instanceof String || value instanceof Number || value instanceof Boolean) {
+                fields.put(key, value.toString());
+            } else if (value instanceof JSONArray array && ("field_conflicts".equals(key)
+                    || "available_fields".equals(key) || "unavailable_fields".equals(key))) {
+                fields.put(key + "_count", Integer.toString(array.length()));
+            }
+        }
+        return fields;
+    }
+
+    private static Object jsonValue(Object value) throws JSONException {
+        if (value instanceof Map<?, ?> map) {
+            JSONObject result = new JSONObject();
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                result.put(String.valueOf(entry.getKey()), jsonValue(entry.getValue()));
+            }
+            return result;
+        }
+        if (value instanceof Iterable<?> iterable) {
+            JSONArray result = new JSONArray();
+            for (Object item : iterable) result.put(jsonValue(item));
+            return result;
+        }
+        return value == null ? JSONObject.NULL : value;
     }
 
     public Status status() {
@@ -298,7 +373,7 @@ public final class DiagnosticCaptureStore {
     /** Latest asynchronous append timing, for measuring diagnostic overhead without synchronous disk I/O. */
     public long lastWriteQueueMillis() { return lastWriteQueueMillis; }
     public long lastWriteDurationMillis() { return lastWriteDurationMillis; }
-
+    public long pendingWriteBytes() { return pendingWriteBytes; }
     public boolean isActive() { return status().active(); }
 
     public int storageLimitMb() {
@@ -329,8 +404,14 @@ public final class DiagnosticCaptureStore {
         }
         String line = record.toString() + "\n";
         long bytes = line.getBytes(StandardCharsets.UTF_8).length;
+        if (!force && pendingWriteBytes + bytes > MAX_PENDING_WRITE_BYTES) {
+            writerQueueDroppedRecords++;
+            lastWriterDroppedKind = kind == null ? "UNKNOWN" : kind;
+            return;
+        }
         if (!force) {
-            DiagnosticCapturePolicy.AppendResult result = policy.reserve(now, bytes);
+            DiagnosticCapturePolicy.AppendResult result = policy.reserve(now, bytes,
+                    DiagnosticCapturePolicy.TERMINAL_EVENT_RESERVE_BYTES);
             if (result != DiagnosticCapturePolicy.AppendResult.APPENDED) {
                 String reason = result == DiagnosticCapturePolicy.AppendResult.DURATION_LIMIT
                         ? "duration_limit" : result == DiagnosticCapturePolicy.AppendResult.STORAGE_LIMIT
@@ -345,7 +426,19 @@ public final class DiagnosticCaptureStore {
         eventCount = sequence;
         reservedBytes += bytes;
         long enqueuedAtElapsed = SystemClock.elapsedRealtime();
-        writer.post(() -> appendLine(line, enqueuedAtElapsed));
+        pendingWriteBytes += bytes;
+        boolean posted = writer.post(() -> {
+            try { appendLine(line, enqueuedAtElapsed); }
+            finally { pendingWriteBytes = Math.max(0, pendingWriteBytes - bytes); }
+        });
+        if (!posted) {
+            pendingWriteBytes = Math.max(0, pendingWriteBytes - bytes);
+            nextSequence = sequence - 1;
+            eventCount = nextSequence;
+            reservedBytes = Math.max(0, reservedBytes - bytes);
+            writerQueueDroppedRecords++;
+            lastWriterDroppedKind = kind == null ? "UNKNOWN" : kind;
+        }
     }
 
     private void appendLine(String line, long enqueuedAtElapsed) {
@@ -373,7 +466,9 @@ public final class DiagnosticCaptureStore {
         stopReason = reason;
         policy.stop(reason);
         flushSkippedEventsLocked(true);
-        appendLocked("SESSION_AUTO_STOPPED", object("reason", reason), true);
+        appendLocked("SESSION_AUTO_STOPPED", object("reason", reason,
+                "writer_queue_dropped_records", writerQueueDroppedRecords,
+                "last_writer_queue_dropped_kind", lastWriterDroppedKind), true);
         writeStateLocked();
     }
 
@@ -407,6 +502,8 @@ public final class DiagnosticCaptureStore {
         reservedBytes = eventsFile.exists() ? eventsFile.length() : 0;
         nextSequence = lastSequenceForSession(sessionId);
         eventCount = nextSequence;
+        writerQueueDroppedRecords = parseLong(state.getProperty("writer_queue_dropped_records"), 0);
+        lastWriterDroppedKind = emptyToNull(state.getProperty("last_writer_queue_dropped_kind"));
         if (wasActive && eventsFile.exists()) {
             long now = System.currentTimeMillis();
             boolean resumed = sessionId != null && policy.resume(now, sessionStartedAt, nextSequence,
@@ -444,6 +541,8 @@ public final class DiagnosticCaptureStore {
         state.setProperty("started_at", Long.toString(sessionStartedAt));
         state.setProperty("max_storage_bytes", Long.toString(sessionMaxStorageBytes));
         state.setProperty("stop_reason", stopReason == null ? "" : stopReason);
+        state.setProperty("writer_queue_dropped_records", Long.toString(writerQueueDroppedRecords));
+        state.setProperty("last_writer_queue_dropped_kind", lastWriterDroppedKind == null ? "" : lastWriterDroppedKind);
         File temporary = new File(directory, STATE_FILE + ".tmp");
         try (FileOutputStream output = new FileOutputStream(temporary)) {
             state.store(output, "Driver Assistant local diagnostic capture state");
