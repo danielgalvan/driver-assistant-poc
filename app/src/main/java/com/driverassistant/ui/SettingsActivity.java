@@ -11,6 +11,7 @@ import com.driverassistant.R;
 import com.driverassistant.config.ConfigRepository;
 import com.driverassistant.config.ThresholdConfig;
 import com.driverassistant.domain.ClassificationStrategy;
+import com.driverassistant.capture.OfferCaptureStrategy;
 import com.driverassistant.parser.LocalizedNumberParser;
 import com.driverassistant.service.UberAccessibilityService;
 import com.driverassistant.util.DiagnosticLogStore;
@@ -45,6 +46,7 @@ public final class SettingsActivity extends AppCompatActivity {
     private MaterialCheckBox showOverall;
     private Spinner strategySpinner;
     private Spinner positionSpinner;
+    private Spinner offerCaptureStrategySpinner;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -82,6 +84,7 @@ public final class SettingsActivity extends AppCompatActivity {
         showOverall = findViewById(R.id.show_overall);
         strategySpinner = findViewById(R.id.classification_strategy);
         positionSpinner = findViewById(R.id.overlay_position);
+        offerCaptureStrategySpinner = findViewById(R.id.offer_capture_strategy);
 
         ArrayAdapter<String> strategyAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item,
                 getResources().getStringArray(R.array.classification_strategy_labels));
@@ -91,6 +94,10 @@ public final class SettingsActivity extends AppCompatActivity {
                 getResources().getStringArray(R.array.overlay_position_labels));
         positionAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         positionSpinner.setAdapter(positionAdapter);
+        ArrayAdapter<String> captureAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item,
+                getResources().getStringArray(R.array.offer_capture_strategy_labels));
+        captureAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        offerCaptureStrategySpinner.setAdapter(captureAdapter);
     }
 
     private void loadValues() {
@@ -121,6 +128,7 @@ public final class SettingsActivity extends AppCompatActivity {
         showTotalTime.setChecked(config.showTotalTime());
         showOverall.setChecked(config.showOverall());
         detailedDiagnostics.setChecked(config.detailedDiagnosticsEnabled());
+        offerCaptureStrategySpinner.setSelection(config.offerCaptureStrategy().ordinal());
     }
 
     private void save() {
@@ -165,6 +173,10 @@ public final class SettingsActivity extends AppCompatActivity {
         }
 
         config.setDetailedDiagnosticsEnabled(detailedDiagnostics.isChecked());
+        OfferCaptureStrategy[] captureStrategies = OfferCaptureStrategy.values();
+        OfferCaptureStrategy selectedCaptureStrategy = captureStrategies[Math.max(0,
+                Math.min(offerCaptureStrategySpinner.getSelectedItemPosition(), captureStrategies.length - 1))];
+        config.setOfferCaptureStrategy(selectedCaptureStrategy);
         UberAccessibilityService.refreshOverlayConfiguration();
         DiagnosticLogStore.record(this, "DA_CONFIG", "CONFIG_SAVED", "thresholds_and_overlay=true");
         Toast.makeText(this, R.string.settings_saved, Toast.LENGTH_SHORT).show();

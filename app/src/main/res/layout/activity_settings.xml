@@ -105,6 +105,19 @@
             app:cardCornerRadius="18dp">
             <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="16dp">
                 <TextView style="@style/SettingsSectionTitle" android:text="@string/diagnostics_title" />
+                <TextView style="@style/SettingsFieldLabel" android:text="@string/offer_capture_strategy" />
+                <Spinner
+                    android:id="@+id/offer_capture_strategy"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="52dp" />
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:paddingBottom="8dp"
+                    android:text="@string/offer_capture_disclosure"
+                    android:textColor="@color/ink_secondary"
+                    android:textSize="12sp" />
                 <com.google.android.material.checkbox.MaterialCheckBox android:id="@+id/detailed_diagnostics" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/detailed_diagnostics" />
                 <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/detailed_diagnostics_disclosure" android:textColor="@color/ink_secondary" android:textSize="12sp" />
             </LinearLayout>

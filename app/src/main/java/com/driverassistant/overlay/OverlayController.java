@@ -42,6 +42,7 @@ public final class OverlayController {
     private View card;
     private Runnable dismissTask;
     private volatile boolean visible;
+    private long lastKeepAliveDiagnosticAt;
 
     public OverlayController(AccessibilityService service) {
         this.service = service;
@@ -81,6 +82,26 @@ public final class OverlayController {
 
     public boolean isVisible() { return visible; }
 
+    /** Keeps a pending offer visible while fresh snapshots continue confirming the same session. */
+    public void keepAlive(long sessionId) {
+        handler.post(() -> keepAliveOnMainThread(sessionId));
+    }
+
+    private void keepAliveOnMainThread(long sessionId) {
+        if (!visible || card == null) return;
+        long now = android.os.SystemClock.uptimeMillis();
+        long durationMillis = config.overlayDurationSeconds() * 1000L;
+        if (!sessionPolicy.refresh(sessionId, now, durationMillis)) return;
+        scheduleDismiss(sessionId, null, false);
+        if (now - lastKeepAliveDiagnosticAt >= 5_000) {
+            lastKeepAliveDiagnosticAt = now;
+            DiagnosticLogStore.record(service, "DA_OVERLAY", "OVERLAY_KEEP_ALIVE",
+                    "session=" + sessionId + "; reason=pending_offer_confirmed");
+            recordCapture("OVERLAY_KEEP_ALIVE", null, sessionId, false,
+                    "reason=pending_offer_confirmed");
+        }
+    }
+
     private void showOnMainThread(TripOffer offer, RideMetrics metrics,
                                   ClassificationResult classification, long sessionId, boolean simulated,
                                   long requestedAt) {
@@ -113,17 +134,9 @@ public final class OverlayController {
             visible = true;
 
             if (decision == OverlaySessionPolicy.Decision.NEW_SESSION) {
-                if (dismissTask != null) handler.removeCallbacks(dismissTask);
-                long currentSession = sessionId;
-                dismissTask = () -> {
-                    if (sessionPolicy.expire(currentSession, android.os.SystemClock.uptimeMillis())) {
-                        boolean removed = removeOnMainThread();
-                        DiagnosticLogStore.record(service, "DA_OVERLAY", "OVERLAY_EXPIRED", "session=" + currentSession);
-                        recordCapture("OVERLAY_EXPIRED", offer, currentSession, simulated,
-                                "reason=display_duration; removed=" + removed);
-                    }
-                };
-                handler.postDelayed(dismissTask, sessionPolicy.remainingMillis(now));
+                scheduleDismiss(sessionId, offer, simulated);
+            } else if (sessionPolicy.refresh(sessionId, now, durationMillis)) {
+                scheduleDismiss(sessionId, offer, simulated);
             }
             DiagnosticLogStore.record(service, "DA_OVERLAY",
                     decision == OverlaySessionPolicy.Decision.NEW_SESSION ? "OVERLAY_SHOWN" : "OVERLAY_UPDATED",
@@ -380,6 +393,20 @@ public final class OverlayController {
         }
         visible = false;
         return removed;
+    }
+
+    private void scheduleDismiss(long sessionId, TripOffer offer, boolean simulated) {
+        if (dismissTask != null) handler.removeCallbacks(dismissTask);
+        dismissTask = () -> {
+            if (sessionPolicy.expire(sessionId, android.os.SystemClock.uptimeMillis())) {
+                boolean removed = removeOnMainThread();
+                DiagnosticLogStore.record(service, "DA_OVERLAY", "OVERLAY_EXPIRED", "session=" + sessionId);
+                recordCapture("OVERLAY_EXPIRED", offer, sessionId, simulated,
+                        "reason=display_duration_without_fresh_offer; removed=" + removed);
+            }
+        };
+        handler.postDelayed(dismissTask, sessionPolicy.remainingMillis(
+                android.os.SystemClock.uptimeMillis()));
     }
 
     private void recordCapture(String kind, TripOffer offer, long sessionId, boolean simulated, String reason) {

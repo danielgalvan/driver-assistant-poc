@@ -15,8 +15,12 @@ driver-assistant/
 `app` depende de `core`; `core` não depende do Android. Assim, regras de negócio podem ser testadas na JVM sem abrir uma Activity ou simular serviços do sistema.
 
 ```text
-AccessibilityService → AccessibilityTreeReader → OfferParser
-                                               → TripOffer
+AccessibilityService event
+  ├─ event source → bounded immutable snapshot → coalescing queue ─┐
+  └─ Uber-window poll (350 ms, adaptive backoff) ───────────────────┤
+                                                                   ▼
+                                                            OfferParser
+                                                                 → TripOffer
 TripOffer → OfferLifecycleMachine → ProfitabilityCalculator → ClassificationService
                                                         ↘ OverlayController
 ```
@@ -46,7 +50,35 @@ As configurações usam `SharedPreferences`; o diagnóstico detalhado usa um arq
 - Android nativo com layouts XML e Material Components
 - Android Gradle Plugin 9.5.0 e Gradle Wrapper 9.6.0
 - `compileSdk 37`, `minSdk 29` (Android 10) e `targetSdk 36`
+- Google ML Kit Text Recognition `16.0.1`, modelo latino embarcado para OCR local
 - JUnit 4 para testes locais do módulo `core`
+
+## Captura visual experimental
+
+A captura visual é opcional, vem desligada por padrão e só é habilitada quando o usuário escolhe uma estratégia em **Configurações → Estratégia de captura de ofertas**. A permissão continua limitada ao `AccessibilityService` explicitamente ativado pelo usuário. O screenshot é processado em memória; nem a imagem bruta nem o texto OCR sem sanitização são persistidos. O OCR usa o modelo latino embarcado do ML Kit e funciona offline após a instalação. As permissões `INTERNET` e `ACCESS_NETWORK_STATE` declaradas por bibliotecas de transporte são removidas do manifesto final; a POC não envia imagens ou textos para servidores.
+
+O fluxo separa as fontes em `app/.../capture` e as regras independentes do Android em `core/.../capture`: o detector agrupa linhas por proximidade relativa e evidências visuais; cada região candidata ainda passa pelo `OfferParser` estrito existente. Bônus e preços dinâmicos isolados não viram oferta. Quando as duas fontes estão ativas, só são combinadas se a identidade da oferta for compatível; divergências são registradas e não geram cartão. A máquina de estados e o `OverlayController` existentes continuam responsáveis por ciclo de vida e apresentação.
+
+| Estratégia | Comportamento |
+|---|---|
+| Somente acessibilidade | Mantém o fluxo atual e não captura screenshots; é o padrão seguro. |
+| Somente OCR | Usa eventos de janela Uber para disparar captura e extrai a oferta pela imagem. |
+| Híbrido | Prioriza acessibilidade e tenta OCR quando a captura estrutural não é aceita. |
+| Diagnóstico comparativo | Executa acessibilidade e OCR em paralelo lógico, registra tempos, campos e divergências sem criar cartões duplicados. |
+
+As chamadas são assíncronas, serializadas e limitadas a uma captura a cada 700 ms; resultados com mais de 2,5 s ou de outra janela são descartados. A instância do reconhecedor é reutilizada e bitmaps são descartados após o OCR.
+
+| Android | Captura usada | Limitação e proteção |
+|---|---|---|
+| API 29 | Sem screenshot; acessibilidade continua disponível. | O Android não oferece as APIs oficiais usadas por esta POC. |
+| API 30–33 | `takeScreenshot()` da tela e recorte pelas bounds da janela Uber. | Exige Uber em primeiro plano. Se uma janela acessível externa intersectar a Uber, a imagem é descartada por segurança. |
+| API 34+ | `takeScreenshotOfWindow()` para a janela Uber. | Requer a janela acessível Uber e pode falhar em janelas `FLAG_SECURE`, indisponíveis ou sob limite de frequência do Android. |
+
+O OCR reconhece somente o idioma latino configurado; erros de leitura, ofertas fora do padrão visual e alterações futuras no layout da Uber podem reduzir a detecção. O modo OCR não relaxa as regras de validação do parser. A coexistência com Rota Pro/GigU e a captura de ofertas reais ainda precisam de validação no aparelho físico; não se presume um layout real nem se declara a captura confirmada antes desse teste.
+
+Dependência adicionada: `com.google.mlkit:text-recognition:16.0.1`, distribuída sob os [Termos de Serviço do Google ML Kit](https://developers.google.com/ml-kit/terms). O modelo é empacotado no app. O APK universal debug desta revisão tem 59.100.429 bytes (56,36 MiB), contra 13.968.966 bytes (13,32 MiB) no APK debug anterior: aumento de aproximadamente 45,13 MB (43,04 MiB). A inspeção do APK atribui cerca de 39,14 MiB às bibliotecas nativas de OCR de quatro ABIs e 1,22 MiB aos assets comprimidos do modelo; o restante inclui mudanças de código e dependências do projeto. O APK universal mantém as bibliotecas de `arm64-v8a`, `armeabi-v7a`, `x86` e `x86_64`, então esse artefato de debug não reduz o download ao ABI do aparelho.
+
+Referências oficiais: [ML Kit Text Recognition v2 para Android](https://developers.google.com/ml-kit/vision/text-recognition/v2/android), [AccessibilityService.takeScreenshot](https://developer.android.com/reference/android/accessibilityservice/AccessibilityService#takeScreenshot(int,java.util.concurrent.Executor,android.accessibilityservice.AccessibilityService.TakeScreenshotCallback)) e [AccessibilityService.takeScreenshotOfWindow](https://developer.android.com/reference/android/accessibilityservice/AccessibilityService#takeScreenshotOfWindow(int,java.util.concurrent.Executor,android.accessibilityservice.AccessibilityService.TakeScreenshotCallback)).
 
 ## Pré-requisitos
 
@@ -125,13 +157,23 @@ adb logcat -s DA_ACCESSIBILITY DA_PARSER DA_OFFER DA_CALCULATOR DA_OVERLAY DA_CO
 
 **Exportar logs de diagnóstico** continua oferecendo o resumo curto pelo seletor de compartilhamento. Para a investigação da regressão, use a nova captura detalhada temporária na tela inicial:
 
-1. Confirme na tela inicial que o serviço de acessibilidade está conectado. Antes do teste, toque em **Iniciar diagnóstico**. Isso independe do cartão flutuante e do botão de monitoramento.
+1. Confirme na tela inicial que o serviço de acessibilidade está conectado. **Diagnóstico**, **Monitoramento** e **Cartão configurado** aparecem como estados separados. Toque em **Iniciar diagnóstico**. Se o monitoramento estiver desligado, o app avisa que a captura e o parser rodam, mas a máquina de estados e o cartão não.
 2. Deixe o Driver Assistant em segundo plano e use o Uber Driver normalmente. A captura permanece no aparelho, sem USB, ADB, Android Studio, Codex ou internet.
 3. Depois do teste, volte ao Driver Assistant e toque em **Encerrar diagnóstico**.
 4. Toque em **Exportar sessão ZIP (JSON)**. O arquivo fica em `Downloads/Driver Assistant/driver-assistant-diagnostic-AAAAmmdd-HHmmss.zip`; dentro dele, `diagnostics.json` contém eventos cronológicos e snapshots anonimizados. Cada registro tem `session_id` para distinguir sessões preservadas.
 5. **Limite de armazenamento** oferece 10, 25, 50 ou 100 MB; começa em 50 MB. Cada sessão encerra automaticamente após 8 horas ou quando atinge o limite. Registros são gravados progressivamente em armazenamento privado; sessões encerradas ficam disponíveis por até 7 dias ou até **Limpar dados de diagnóstico**.
 
-A captura detalhada fica desativada até o usuário iniciá-la. Snapshots guardam ordem, hierarquia, classe, ID, visibilidade e somente textos relevantes do Uber Driver depois de remover nomes/endereços/telefones reconhecíveis. O conteúdo das árvores de outros apps nunca é lido ou salvo; eventos externos são resumidos por pacote/tipo e metadados da janela. Os candidatos rejeitados são preservados como registros append-only, para que eventos do mapa não substituam o snapshot anterior. A máquina de ofertas continua usando as regras existentes nesta entrega; esta instrumentação não comprova que a captura real de ofertas foi corrigida.
+A captura detalhada fica desativada até o usuário iniciá-la. Snapshots guardam ordem, hierarquia, classe, ID, visibilidade e textos relevantes anonimizados do Uber Driver. Valores de nota, preço e medida fragmentados são mantidos somente quando os elementos próximos fornecem contexto. O conteúdo das árvores de outros apps nunca é lido ou salvo; eventos externos são resumidos por pacote/tipo e metadados da janela. A fila é limitada a oito snapshots, coalesce o trabalho repetido da mesma janela e protege snapshots com sinais de oferta de eventos comuns do mapa. Uma subárvore capturada no callback não fica esperando para consultar a árvore viva depois. Parsing, máquina de estados e escrita do diagnóstico rodam na thread de análise.
+
+Com o monitoramento ativo, uma rotina consulta as janelas pertencentes ao pacote Uber mesmo antes de reconhecer a primeira oferta. Ela começa em 350 ms, recua para 1 s após uma leitura estável e para 1,5 s quando nenhuma janela Uber está acessível. Um evento novo ou sinal de oferta restaura a frequência rápida. O ciclo não acumula consultas simultâneas. Eventos capturam no callback um contexto limitado a 64 nós; o polling limita a leitura completa a 220 nós por janela e examina até três janelas Uber, começando pelas ativas/focadas. A maior árvore do diagnóstico anterior tinha 194 nós. Uma árvore truncada pode ser analisada para uma oferta presente, mas não serve sozinha para declarar seu desaparecimento. Rejeições de subárvores parciais de eventos também não encerram uma oferta.
+
+### Evidência da sessão de 27/11 e causa confirmada
+
+O arquivo `driver-assistant-diagnostic-20261127-session.json` contém 306 registros, 178 eventos de acessibilidade, 27 snapshots e 26 resultados do parser. Todas as 26 execuções indicaram `monitoring_enabled=true`; nenhuma foi aceita. As rejeições foram 15 por contexto de mapa, 10 por falta de ação/valor rotulado e 1 por mapa de oportunidades offline. Houve dois registros de estouro da fila; o atraso registrado chegou a 2.768 ms, a leitura da árvore a 1.083 ms e o processamento total a 3.629 ms. O usuário confirmou que duas ofertas reais foram exibidas durante a sessão; portanto, esses dados mostram que o app não as reconheceu, não que elas não existiram.
+
+Na implementação anterior, a fila guardava apenas metadados do evento. A thread de análise consultava a janela viva depois, podendo ler uma tela posterior; enquanto isso, eventos de conteúdo acumulavam e eram descartados. O polling também só começava depois de uma oferta já reconhecida. Esses dois gargalos estão confirmados no código e nos tempos do diagnóstico. Os IDs `ub_driver_offers_browse_*` e `ub__driver_job_offers_pill_*` apareceram visíveis em alguns snapshots e invisíveis em outros. Eles identificam a área de ofertas/oportunidades, mas não provam por si só que um cartão de corrida esteja presente; são usados apenas para preservar/priorizar a captura.
+
+As regras do `OfferParser` e os limites do semáforo não foram alterados. A validação no aparelho ainda precisa confirmar se o evento da oferta real expõe dados suficientes na subárvore capturada e se o polling de 220 nós termina rápido o bastante no Xiaomi. A coleta nova registra `snapshot_origin`, idade do evento na recepção, tempos monotônicos de captura/fila/leitura/parsing/escrita e o resultado de cada janela; isso permitirá localizar a etapa da próxima oferta sem gravar conteúdo de outros apps.
 
 O modo **Diagnóstico detalhado da estrutura acessível** nas configurações continua separado e desligado por padrão. Ele grava o resumo estrutural já existente; a sessão temporária acima registra os dados necessários para a investigação e exporta JSON.
 

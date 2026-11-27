@@ -1,5 +1,8 @@
 package com.driverassistant.diagnostics;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
+
 /** Android-free limits and counters for an explicitly started diagnostic capture session. */
 public final class DiagnosticCapturePolicy {
     public static final long DEFAULT_MAX_DURATION_MILLIS = 8L * 60 * 60 * 1000;
@@ -15,9 +18,13 @@ public final class DiagnosticCapturePolicy {
     private long reservedBytes;
     private long eventCount;
     private String stopReason;
-    private String lastSnapshotFingerprint;
-    private String lastOfferSnapshotFingerprint;
-    private long lastSnapshotAtMillis;
+    private final Map<String, SnapshotState> snapshotStates = new LinkedHashMap<>();
+
+    private static final class SnapshotState {
+        String lastFingerprint;
+        String lastOfferFingerprint;
+        long lastAtMillis;
+    }
 
     public synchronized boolean start(long nowMillis, long existingBytes,
                                       long maxStorageBytes, long maxDurationMillis) {
@@ -30,9 +37,7 @@ public final class DiagnosticCapturePolicy {
         this.reservedBytes = existingBytes;
         this.eventCount = 0;
         this.stopReason = null;
-        this.lastSnapshotFingerprint = null;
-        this.lastOfferSnapshotFingerprint = null;
-        this.lastSnapshotAtMillis = 0;
+        snapshotStates.clear();
         return true;
     }
 
@@ -49,26 +54,47 @@ public final class DiagnosticCapturePolicy {
         this.reservedBytes = existingBytes;
         this.eventCount = eventCount;
         this.stopReason = null;
-        this.lastSnapshotFingerprint = null;
-        this.lastOfferSnapshotFingerprint = null;
-        this.lastSnapshotAtMillis = 0;
+        snapshotStates.clear();
         return true;
     }
 
     /** Captures changed trees at a bounded rate while preserving every newly distinct offer candidate. */
     public synchronized boolean shouldPersistSnapshot(String fingerprint, boolean offerCandidate, long nowMillis) {
+        return shouldPersistSnapshot(fingerprint, offerCandidate, false, nowMillis);
+    }
+
+    /** Also preserves distinct trees associated with explicit window or relevant text changes. */
+    public synchronized boolean shouldPersistSnapshot(String fingerprint, boolean offerCandidate,
+                                                       boolean relevantWindowChange, long nowMillis) {
+        return shouldPersistSnapshot("default", fingerprint, offerCandidate, relevantWindowChange, nowMillis);
+    }
+
+    /** Deduplicates independently for each accessible window so one window cannot suppress another. */
+    public synchronized boolean shouldPersistSnapshot(String scope, String fingerprint, boolean offerCandidate,
+                                                       boolean relevantWindowChange, long nowMillis) {
         if (!active || fingerprint == null || nowMillis < startedAtMillis) return false;
-        boolean first = lastSnapshotFingerprint == null;
-        boolean changed = !fingerprint.equals(lastSnapshotFingerprint);
-        boolean newOfferCandidate = offerCandidate && !fingerprint.equals(lastOfferSnapshotFingerprint);
-        boolean ordinarySnapshotDue = changed && nowMillis - lastSnapshotAtMillis >= MIN_SNAPSHOT_INTERVAL_MILLIS;
-        boolean offerRefreshDue = offerCandidate && nowMillis - lastSnapshotAtMillis >= OFFER_SNAPSHOT_REFRESH_MILLIS;
-        boolean shouldPersist = first || newOfferCandidate || ordinarySnapshotDue || offerRefreshDue;
-        if (shouldPersist) {
-            lastSnapshotFingerprint = fingerprint;
-            lastSnapshotAtMillis = nowMillis;
+        String safeScope = scope == null ? "default" : scope;
+        SnapshotState state = snapshotStates.get(safeScope);
+        if (state == null) {
+            if (snapshotStates.size() >= 32) {
+                String oldest = snapshotStates.keySet().iterator().next();
+                snapshotStates.remove(oldest);
+            }
+            state = new SnapshotState();
+            snapshotStates.put(safeScope, state);
         }
-        if (offerCandidate) lastOfferSnapshotFingerprint = fingerprint;
+        boolean first = state.lastFingerprint == null;
+        boolean changed = !fingerprint.equals(state.lastFingerprint);
+        boolean newOfferCandidate = offerCandidate && !fingerprint.equals(state.lastOfferFingerprint);
+        boolean relevantChange = changed && relevantWindowChange;
+        boolean ordinarySnapshotDue = changed && nowMillis - state.lastAtMillis >= MIN_SNAPSHOT_INTERVAL_MILLIS;
+        boolean offerRefreshDue = offerCandidate && nowMillis - state.lastAtMillis >= OFFER_SNAPSHOT_REFRESH_MILLIS;
+        boolean shouldPersist = first || newOfferCandidate || relevantChange || ordinarySnapshotDue || offerRefreshDue;
+        if (shouldPersist) {
+            state.lastFingerprint = fingerprint;
+            state.lastAtMillis = nowMillis;
+        }
+        if (offerCandidate) state.lastOfferFingerprint = fingerprint;
         return shouldPersist;
     }
 

@@ -431,7 +431,7 @@ public final class OfferParser {
                     ? remap[node.parentOrder()] : -1;
             scoped.add(new AccessibilityNode(node.text(), node.contentDescription(), node.resourceId(),
                     node.className(), parent, Math.max(0, node.depth() - baseDepth), scopedOrder,
-                    node.visibleToUser()));
+                    node.visibleToUser(), node.selected(), node.checked()));
         }
         return scoped;
     }

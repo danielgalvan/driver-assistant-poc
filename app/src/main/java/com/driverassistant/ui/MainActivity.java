@@ -68,6 +68,8 @@ public final class MainActivity extends AppCompatActivity {
     private TextView lastOffer;
     private TextView recentEvents;
     private TextView captureStatus;
+    private TextView captureModesStatus;
+    private TextView captureModeWarning;
     private TextView captureDisclosure;
     private MaterialButton captureStartButton;
     private MaterialButton captureStopButton;
@@ -105,6 +107,8 @@ public final class MainActivity extends AppCompatActivity {
         lastOffer = findViewById(R.id.last_offer);
         recentEvents = findViewById(R.id.recent_events);
         captureStatus = findViewById(R.id.capture_status);
+        captureModesStatus = findViewById(R.id.capture_modes_status);
+        captureModeWarning = findViewById(R.id.capture_mode_warning);
         captureDisclosure = findViewById(R.id.capture_disclosure);
         captureStartButton = findViewById(R.id.capture_start_button);
         captureStopButton = findViewById(R.id.capture_stop_button);
@@ -200,6 +204,13 @@ public final class MainActivity extends AppCompatActivity {
         captureStatus.setText(getString(status.active() ? R.string.capture_status_active : R.string.capture_status_inactive,
                 eventCount, status.usedMegabytes(), status.limitMegabytes(),
                 status.active() ? getString(R.string.capture_running) : reason));
+        boolean monitoring = config.monitoringEnabled();
+        captureModesStatus.setText(getString(R.string.capture_modes_status,
+                status.active() ? getString(R.string.enabled) : getString(R.string.disabled),
+                monitoring ? getString(R.string.enabled) : getString(R.string.disabled),
+                config.overlayEnabled() ? getString(R.string.enabled) : getString(R.string.disabled)));
+        captureModesStatus.setTextColor(getColor(monitoring ? R.color.signal_green : R.color.signal_red));
+        captureModeWarning.setVisibility(status.active() && !monitoring ? View.VISIBLE : View.GONE);
         captureDisclosure.setText(getString(R.string.capture_disclosure, status.configuredLimitMb()));
         captureLimitButton.setText(getString(R.string.capture_limit, status.configuredLimitMb()));
         captureStartButton.setEnabled(!status.active());
@@ -209,7 +220,25 @@ public final class MainActivity extends AppCompatActivity {
 
     private void startCapture() {
         if (!ensureAccessibilityServiceReady()) return;
+        if (!config.monitoringEnabled()) {
+            new MaterialAlertDialogBuilder(this)
+                    .setTitle(R.string.capture_title)
+                    .setMessage(R.string.capture_monitoring_off_dialog)
+                    .setPositiveButton(R.string.capture_start_anyway, (dialog, which) -> startCaptureNow())
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .show();
+            return;
+        }
+        startCaptureNow();
+    }
+
+    private void startCaptureNow() {
         if (captureStore.startCapture()) {
+            captureStore.record("MODE_STATE", DiagnosticCaptureStore.object(
+                    "reason", "capture_started",
+                    "accessibility_service_connected", UberAccessibilityService.isConnected(),
+                    "monitoring_enabled", config.monitoringEnabled(),
+                    "overlay_configured", config.overlayEnabled()));
             Toast.makeText(this, R.string.capture_started, Toast.LENGTH_SHORT).show();
         } else {
             Toast.makeText(this, R.string.capture_start_failed, Toast.LENGTH_LONG).show();

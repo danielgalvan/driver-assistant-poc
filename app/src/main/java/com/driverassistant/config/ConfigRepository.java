@@ -4,6 +4,7 @@ import android.content.Context;
 import android.content.SharedPreferences;
 
 import com.driverassistant.domain.ClassificationStrategy;
+import com.driverassistant.capture.OfferCaptureStrategy;
 
 /** Persistência local das preferências, isolada da interface e do serviço Android. */
 public final class ConfigRepository {
@@ -88,6 +89,16 @@ public final class ConfigRepository {
     public boolean detailedDiagnosticsEnabled() { return preferences.getBoolean("detailed_diagnostics", false); }
     public void setDetailedDiagnosticsEnabled(boolean enabled) {
         preferences.edit().putBoolean("detailed_diagnostics", enabled).apply();
+    }
+
+    public OfferCaptureStrategy offerCaptureStrategy() {
+        return OfferCaptureStrategy.fromStoredValue(preferences.getString(
+                "offer_capture_strategy", OfferCaptureStrategy.ACCESSIBILITY_ONLY.name()));
+    }
+
+    public void setOfferCaptureStrategy(OfferCaptureStrategy strategy) {
+        OfferCaptureStrategy safe = strategy == null ? OfferCaptureStrategy.ACCESSIBILITY_ONLY : strategy;
+        preferences.edit().putString("offer_capture_strategy", safe.name()).apply();
     }
 
     public boolean saveOverlaySettings(boolean enabled, int durationSeconds, String position,

@@ -6,5 +6,7 @@ local.properties
 *.apk
 *.aab
 captures/
+# Local device captures; keep the core diagnostics source package tracked.
+/diagnostics/
 .externalNativeBuild/
 .cxx/

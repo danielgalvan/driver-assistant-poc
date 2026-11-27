@@ -10,4 +10,10 @@
         <item>@string/position_bottom_right</item>
         <item>@string/position_bottom_left</item>
     </string-array>
+    <string-array name="offer_capture_strategy_labels">
+        <item>@string/capture_accessibility_only</item>
+        <item>@string/capture_ocr_only</item>
+        <item>@string/capture_hybrid</item>
+        <item>@string/capture_comparative</item>
+    </string-array>
 </resources>
